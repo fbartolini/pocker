@@ -186,10 +186,12 @@
 								server.version &&
 								compareVersions(server.version, app.latestVersion) < 0}
 							{@const showVersion = app.versions.length > 1 && isOutdated}
+							{@const isRunning = server.state === 'running'}
 							<button
 								type="button"
 								class="tag chip"
 								class:outdated={isOutdated}
+								class:stopped={!isRunning}
 								disabled={!destination}
 								style:border-color={server.color}
 								on:click={() => {
@@ -197,6 +199,7 @@
 								}}
 								title={destination ? 'Open service' : 'No exposed endpoint detected'}
 							>
+								<span class="chip-status" class:running={isRunning} class:stopped={!isRunning}></span>
 								<span class="chip-name">{server.sourceLabel}</span>
 								{#if showVersion && server.version}
 									<span class="chip-version">{formatVersionLabel(server.version)}</span>
@@ -456,6 +459,13 @@
 		height: auto;
 		line-height: 1.3;
 		font-size: 0.72rem;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+	}
+
+	.tag.chip.stopped {
+		opacity: 0.7;
 	}
 
 	.tag.chip:disabled {
@@ -467,6 +477,25 @@
 		border-color: rgba(255, 99, 132, 0.65);
 		background: rgba(255, 99, 132, 0.12);
 		color: #ffdbe4;
+	}
+
+	.chip-status {
+		display: inline-block;
+		width: 0.35rem;
+		height: 0.35rem;
+		border-radius: 50%;
+		margin-right: 0.25rem;
+		flex-shrink: 0;
+	}
+
+	.chip-status.running {
+		background-color: #51cf66;
+		box-shadow: 0 0 0 2px rgba(81, 207, 102, 0.3);
+	}
+
+	.chip-status.stopped {
+		background-color: #868e96;
+		opacity: 0.6;
 	}
 
 	.chip-name {
