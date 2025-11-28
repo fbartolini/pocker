@@ -4,8 +4,13 @@ FROM node:22-alpine AS build
 WORKDIR /app
 
 # Update Alpine packages to fix CVE-2025-46394 and CVE-2024-58251 (busybox)
-# This updates busybox from 1.37.0-r19 to the latest available version
-RUN apk update && apk upgrade --no-cache
+# This updates busybox from 1.37.0-r19 to 1.37.0-r20 or later
+# Clear cache and update package index to ensure latest versions
+RUN apk update && apk upgrade --no-cache && apk cache clean
+
+# Update npm to latest version to fix CVE-2025-64756 (glob CLI vulnerability)
+# This ensures npm's bundled glob package is patched
+RUN npm install -g npm@latest
 
 COPY package*.json ./
 RUN npm ci
@@ -17,7 +22,11 @@ FROM node:22-alpine AS runner
 WORKDIR /app
 
 # Update Alpine packages in runner stage to fix busybox vulnerabilities
-RUN apk update && apk upgrade --no-cache
+# Clear cache and update package index to ensure latest versions
+RUN apk update && apk upgrade --no-cache && apk cache clean
+
+# Update npm to latest version to fix CVE-2025-64756 (glob CLI vulnerability)
+RUN npm install -g npm@latest
 
 ENV NODE_ENV=production \
 	PORT=4173
