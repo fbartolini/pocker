@@ -14,25 +14,63 @@ A consolidated dashboard for monitoring Docker containers across multiple server
 
 ## Quick Start
 
+**Docker Image:** Available on [Docker Hub](https://hub.docker.com/repository/docker/fbartolini/pocker) as `fbartolini/pocker:latest`
+
 ### Using Docker Compose (Recommended)
 
+1. **Create a directory for your configuration:**
 ```sh
-git clone <repo>
+mkdir -p pocker/config
 cd pocker
-cp env.example .env
-mkdir -p config
+```
+
+2. **Create your configuration files:**
+```sh
+# Copy the sample config
+curl -o config/docker-sources.sample.json https://raw.githubusercontent.com/fbartolini/pocker/main/config/docker-sources.sample.json
 cp config/docker-sources.sample.json config/docker-sources.json
+
 # Edit config/docker-sources.json with your Docker sources
-docker compose up -d --build
+# Optionally create config/icon-map.json for custom icons
+```
+
+3. **Create docker-compose.yml:**
+```yaml
+services:
+  pocker:
+    image: fbartolini/pocker:latest
+    container_name: pocker
+    restart: unless-stopped
+    ports:
+      - "4173:4173"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config:/app/config:ro
+    environment:
+      - NODE_ENV=production
+      - PORT=4173
+```
+
+4. **Start the container:**
+```sh
+docker compose up -d
 ```
 
 The dashboard will be available at `http://localhost:4173`
 
+**Note:** You can also clone the repository to get the full `docker-compose.yml` and sample files:
+```sh
+git clone https://github.com/fbartolini/pocker.git
+cd pocker
+cp env.example .env
+cp config/docker-sources.sample.json config/docker-sources.json
+# Edit config/docker-sources.json
+docker compose up -d
+```
+
 ### Configuration
 
 Create `config/docker-sources.json` to define your Docker sources:
-
-```json
 
 ```json
 [
@@ -89,17 +127,35 @@ Key environment variables (see `env.example` for all options):
 
 Perfect for integrating into dashboards like Homepage or Homarr.
 
-### Manual Docker Run
+### Using Docker Run
 
 ```sh
+docker run -d \
+  --name pocker \
+  --restart unless-stopped \
+  -p 4173:4173 \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v $(pwd)/config:/app/config:ro \
+  -e NODE_ENV=production \
+  -e PORT=4173 \
+  fbartolini/pocker:latest
+```
+
+**Important:** Mount your `config` directory to `/app/config` inside the container. The port defaults to `4173` (set `PORT` env var to change).
+
+### Building from Source
+
+If you prefer to build the image yourself:
+
+```sh
+git clone https://github.com/fbartolini/pocker.git
+cd pocker
 docker build -t pocker .
-docker run --rm -p 4173:4173 --env-file .env \
+docker run --rm -p 4173:4173 \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v $(pwd)/config:/app/config:ro \
   pocker
 ```
-
-**Important:** Mount your `config` directory to `/app/config` inside the container. The port defaults to `4173` (set `PORT` env var to change).
 
 ### Custom Icons
 

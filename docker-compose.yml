@@ -1,6 +1,6 @@
 services:
   pocker:
-    build: .
+    image: fbartolini/pocker:latest
     container_name: pocker
     restart: unless-stopped
     ports:
