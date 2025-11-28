@@ -1,0 +1,34 @@
+[
+	{
+		"name": "local",
+		"socket": "unix:///var/run/docker.sock",
+		"label": "Local Docker",
+		"color": "#4f80ff"
+	},
+	{
+		"name": "media",
+		"endpoint": "http://192.168.50.101:2375",
+		"label": "Media Server",
+		"ui": "https://192.168.50.101:9443/#!/3/docker/dashboard"
+	},
+	{
+		"name": "edge",
+		"endpoint": "http://edge-proxy:2375",
+		"label": "Edge Server",
+		"ui": "http://edge.home.arpa",
+		"user": "proxy",
+		"password": "secret"
+	},
+	{
+		"name": "remote",
+		"endpoint": "https://remote-proxy:2376",
+		"label": "Remote Server",
+		"user": "proxy",
+		"password": "secret",
+		"ca": "/path/to/ca.pem",
+		"cert": "/path/to/cert.pem",
+		"key": "/path/to/key.pem",
+		"tlsRejectUnauthorized": false
+	}
+]
+

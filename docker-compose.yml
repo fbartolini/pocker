@@ -1,0 +1,16 @@
+services:
+  pocker:
+    build: .
+    container_name: pocker
+    restart: unless-stopped
+    ports:
+      - "4173:4173"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=4173
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config:/app/config:ro
+

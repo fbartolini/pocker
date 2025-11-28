@@ -1,0 +1,12 @@
+node_modules
+.svelte-kit
+build
+.git
+npm-debug.log
+.env
+.env.local
+.env.*.local
+Dockerfile
+docker-compose.yml
+config/icon-map.sample.json
+
