@@ -109,12 +109,23 @@ const toServerInstance = (
 	// Use source color if defined, otherwise generate one based on source name
 	const color = source.color ?? generateColorForString(source.name);
 
+	// Extract exit code from Status field (e.g., "Exited (1) 2 hours ago" -> 1)
+	// Status format: "Exited (code) time ago" or "Up time"
+	let exitCode: number | null = null;
+	if (container.State === 'exited' && container.Status) {
+		const match = container.Status.match(/Exited \((\d+)\)/);
+		if (match) {
+			exitCode = parseInt(match[1], 10);
+		}
+	}
+
 	return {
 		sourceId: source.name,
 		sourceLabel: source.displayName,
 		containerId: container.Id,
 		containerName: container.Names?.[0]?.replace(/^\//, '') ?? container.Id.slice(0, 12),
 		state: container.State ?? 'unknown',
+		exitCode,
 		version: labels['org.opencontainers.image.version'],
 		uiUrl: preferredUrl,
 		ports,

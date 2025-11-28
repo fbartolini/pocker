@@ -16,6 +16,7 @@ export type ServerInstance = {
 	containerId: string;
 	containerName: string;
 	state: string;
+	exitCode?: number | null; // Exit code for stopped containers (null if running or unknown)
 	version?: string | null;
 	uiUrl?: string | null;
 	ports: ExposedPort[];
