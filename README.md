@@ -145,7 +145,7 @@ docker run -d \
 
 ### Building from Source
 
-If you prefer to build the image yourself:
+If you prefer to build the image yourself (useful for ARM64/Apple Silicon):
 
 ```sh
 git clone https://github.com/fbartolini/pocker.git
@@ -156,6 +156,8 @@ docker run --rm -p 4173:4173 \
   -v $(pwd)/config:/app/config:ro \
   pocker
 ```
+
+**Note:** The Docker Hub image is built for both AMD64 and ARM64. If you encounter an "exec format error", it means the image hasn't been rebuilt with multi-architecture support yet. You can build locally for your architecture, or wait for the next automated build.
 
 ### Custom Icons
 
