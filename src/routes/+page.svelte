@@ -3,14 +3,15 @@
 	import { onMount } from 'svelte';
 	import type { AggregatedApp, AppsResponse } from '$lib/types';
 	import { compareVersions, formatVersionLabel } from '$lib/utils/version';
+	import Tooltip from '$lib/components/Tooltip.svelte';
 
 	// Format bytes to human-readable format
-	const formatBytes = (bytes: number): string => {
+	const formatBytes = (bytes: number, decimals: number = 1): string => {
 		if (bytes === 0) return '0 B';
 		const k = 1024;
 		const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
 		const i = Math.floor(Math.log(bytes) / Math.log(k));
-		return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+		return `${(bytes / Math.pow(k, i)).toFixed(decimals)} ${sizes[i]}`;
 	};
 
 	// Format percentage
@@ -34,6 +35,11 @@
 	let hoverTimeout: ReturnType<typeof setTimeout> | null = null;
 	let hoveredAppId: string | null = null;
 	let statsFetched = false; // Track if we've fetched stats to avoid duplicate calls
+	let hoveredContainer: { sourceId: string; containerId: string; containerName: string; element: HTMLElement | null } | null = null;
+	let containerStats: Record<string, any> = {}; // Cache of container stats
+	let containerStatsTimeout: ReturnType<typeof setTimeout> | null = null;
+	let hoveredServer: { sourceLabel: string; element: HTMLElement | null } | null = null; // Track which server is being hovered
+	let serverDetails: Record<string, { topContainers: Array<{ name: string; memory: number }>; memoryTotal: number }> = {};
 
 	$: embedMode = data.embed;
 	$: pageMaxWidth = data.maxWidth;
@@ -108,6 +114,86 @@
 		if (tooltip) {
 			tooltip.style.display = 'none';
 		}
+	};
+
+	const handleContainerHover = async (sourceId: string, containerId: string, containerName: string, event: MouseEvent) => {
+		// Clear any existing timeout
+		if (containerStatsTimeout) {
+			clearTimeout(containerStatsTimeout);
+		}
+
+		// Only fetch stats for running containers
+		const container = snapshot.apps
+			.flatMap(app => app.containers)
+			.find(c => c.sourceId === sourceId && c.containerId === containerId);
+
+		if (!container || container.state !== 'running') {
+			return;
+		}
+
+		const targetElement = (event.currentTarget as HTMLElement);
+		hoveredContainer = { sourceId, containerId, containerName, element: targetElement };
+
+		// Debounce: wait 500ms before fetching
+		containerStatsTimeout = setTimeout(async () => {
+			// Check cache first (cache for 2 seconds)
+			const cacheKey = `${sourceId}-${containerId}`;
+			const cached = containerStats[cacheKey];
+			if (cached && Date.now() - cached.timestamp < 2000) {
+				// Trigger reactivity to show tooltip
+				containerStats = { ...containerStats };
+				return; // Use cached data
+			}
+			
+			try {
+				const response = await fetch(`/api/container/${sourceId}/${containerId}/stats`);
+				if (response.ok) {
+					const stats = await response.json();
+					containerStats[cacheKey] = {
+						...stats,
+						timestamp: Date.now()
+					};
+					// Trigger reactivity to show tooltip
+					containerStats = { ...containerStats };
+				}
+			} catch (error) {
+				// Silently fail
+			}
+		}, 500);
+	};
+
+
+	const handleContainerLeave = () => {
+		if (containerStatsTimeout) {
+			clearTimeout(containerStatsTimeout);
+			containerStatsTimeout = null;
+		}
+		hoveredContainer = null;
+	};
+
+	const handleServerHover = async (sourceLabel: string, event: MouseEvent) => {
+		const targetElement = (event.currentTarget as HTMLElement);
+		hoveredServer = { sourceLabel, element: targetElement };
+		
+		// Find the sourceId for this server
+		const serverStat = snapshot.serverStats?.find(s => s.sourceLabel === sourceLabel);
+		if (serverStat && !serverDetails[serverStat.sourceId]) {
+			// Fetch detailed server info
+			try {
+				const response = await fetch(`/api/server/${serverStat.sourceId}/details`);
+				if (response.ok) {
+					const details = await response.json();
+					serverDetails[serverStat.sourceId] = details;
+					serverDetails = { ...serverDetails }; // Trigger reactivity
+				}
+			} catch (error) {
+				// Silently fail
+			}
+		}
+	};
+
+	const handleServerLeave = () => {
+		hoveredServer = null;
 	};
 
 	const fetchApps = async () => {
@@ -274,25 +360,61 @@
 							{@const showVersion = app.versions.length > 1 && isOutdated}
 							{@const isRunning = server.state === 'running'}
 							{@const isCrashed = !isRunning && server.exitCode !== null && server.exitCode !== 0}
-							<button
-								type="button"
-								class="tag chip"
-								class:outdated={isOutdated}
-								class:stopped={!isRunning && !isCrashed}
-								class:crashed={isCrashed}
-								disabled={!destination}
-								style:border-color={server.color}
-								on:click={() => {
-									if (destination) window.open(destination, '_blank', 'noopener');
-								}}
-								title={destination ? 'Open service' : 'No exposed endpoint detected'}
-							>
-								<span class="chip-status" class:running={isRunning} class:stopped={!isRunning && !isCrashed} class:crashed={isCrashed}></span>
-								<span class="chip-name">{server.sourceLabel}</span>
-								{#if showVersion && server.version}
-									<span class="chip-version">{formatVersionLabel(server.version)}</span>
+							{@const cacheKey = `${server.sourceId}-${server.containerId}`}
+							{@const stats = containerStats[cacheKey]}
+							{@const isHovered = hoveredContainer?.sourceId === server.sourceId && hoveredContainer?.containerId === server.containerId}
+							<div class="chip-wrapper">
+								<button
+									type="button"
+									class="tag chip"
+									class:outdated={isOutdated}
+									class:stopped={!isRunning && !isCrashed}
+									class:crashed={isCrashed}
+									disabled={!destination}
+									style:border-color={server.color}
+									on:click={() => {
+										if (destination) window.open(destination, '_blank', 'noopener');
+									}}
+									on:mouseenter={(e) => handleContainerHover(server.sourceId, server.containerId, server.containerName, e)}
+									on:mouseleave={handleContainerLeave}
+									title={destination ? 'Open service' : 'No exposed endpoint detected'}
+								>
+									<span class="chip-status" class:running={isRunning} class:stopped={!isRunning && !isCrashed} class:crashed={isCrashed}></span>
+									<span class="chip-name">{server.sourceLabel}</span>
+									{#if showVersion && server.version}
+										<span class="chip-version">{formatVersionLabel(server.version)}</span>
+									{/if}
+								</button>
+								{#if isHovered && isRunning && stats && hoveredContainer?.element}
+									<Tooltip target={hoveredContainer.element}>
+										<div class="stats-header">{server.containerName}</div>
+										{#if stats.memory}
+											<div class="stats-row">
+												<span class="stats-label">Memory:</span>
+												<span class="stats-value">{formatBytes(stats.memory.usage, 1)} / {formatBytes(stats.memory.limit, 1)} ({stats.memory.percent.toFixed(0)}%)</span>
+											</div>
+										{/if}
+										{#if stats.cpu !== undefined}
+											<div class="stats-row">
+												<span class="stats-label">CPU:</span>
+												<span class="stats-value">{stats.cpu.percent.toFixed(1)}%</span>
+											</div>
+										{/if}
+										{#if stats.network}
+											<div class="stats-row">
+												<span class="stats-label">Network:</span>
+												<span class="stats-value">↓ {formatBytes(stats.network.rx_bytes, 1)} ↑ {formatBytes(stats.network.tx_bytes, 1)}</span>
+											</div>
+										{/if}
+										{#if stats.pids !== undefined}
+											<div class="stats-row">
+												<span class="stats-label">PIDs:</span>
+												<span class="stats-value">{stats.pids}</span>
+											</div>
+										{/if}
+									</Tooltip>
 								{/if}
-							</button>
+							</div>
 						{/each}
 					</div>
 				</article>
@@ -307,7 +429,60 @@
 				{#each snapshot.serverStats as stats}
 					<div class="stat-card">
 						<div class="stat-header">
-							<span class="stat-server" style:border-color={stats.color ?? 'rgba(79, 128, 255, 0.25)'}>{stats.sourceLabel}</span>
+							<div class="stat-server-wrapper">
+								<span 
+									class="stat-server" 
+									style:border-color={stats.color ?? 'rgba(79, 128, 255, 0.25)'}
+									on:mouseenter={(e) => handleServerHover(stats.sourceLabel, e)}
+									on:mouseleave={handleServerLeave}
+								>{stats.sourceLabel}</span>
+								{#if hoveredServer?.sourceLabel === stats.sourceLabel && hoveredServer?.element}
+									{@const details = serverDetails[stats.sourceId]}
+									<Tooltip target={hoveredServer.element}>
+										<div class="stats-header">{stats.sourceLabel}</div>
+										{#if stats.dockerVersion}
+											<div class="stats-row">
+												<span class="stats-label">Docker:</span>
+												<span class="stats-value">{stats.dockerVersion}</span>
+											</div>
+										{/if}
+										{#if stats.memory}
+											<div class="stats-divider"></div>
+											<div class="stats-row">
+												<span class="stats-label">Memory:</span>
+												<span class="stats-value">{formatBytes(stats.memory.used, 1)} / {formatBytes(stats.memory.total, 1)} ({formatPercent(stats.memory.used, stats.memory.total)})</span>
+											</div>
+											<div class="stats-row">
+												<span class="stats-label">Available:</span>
+												<span class="stats-value">{formatBytes(stats.memory.available, 1)}</span>
+											</div>
+										{/if}
+										{#if stats.storage}
+											<div class="stats-divider"></div>
+											<div class="stats-row">
+												<span class="stats-label">Storage:</span>
+												<span class="stats-value">{formatBytes(stats.storage.used, 1)} / {formatBytes(stats.storage.total, 1)} ({formatPercent(stats.storage.used, stats.storage.total)})</span>
+											</div>
+											<div class="stats-row">
+												<span class="stats-label">Available:</span>
+												<span class="stats-value">{formatBytes(stats.storage.available, 1)}</span>
+											</div>
+										{/if}
+										{#if details && details.topContainers && details.topContainers.length > 0}
+											<div class="stats-divider"></div>
+											<div class="stats-row">
+												<span class="stats-label" style="font-weight: 600;">Top Containers (Memory):</span>
+											</div>
+											{#each details.topContainers as container}
+												<div class="stats-row" style="padding-left: 0.5rem; font-size: 0.68rem;">
+													<span class="stats-label" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px;">{container.name}:</span>
+													<span class="stats-value">{formatBytes(container.memory, 1)}</span>
+												</div>
+											{/each}
+										{/if}
+									</Tooltip>
+								{/if}
+							</div>
 							{#if stats.dockerVersion}
 								<span class="stat-version">Docker {stats.dockerVersion}</span>
 							{/if}
@@ -691,6 +866,13 @@
 		font-size: 0.72rem;
 	}
 
+	.chip-wrapper {
+		position: relative;
+		display: inline-block;
+	}
+
+
+
 	.empty {
 		color: #8ea1d8;
 		font-size: 0.95rem;
@@ -759,6 +941,11 @@
 		gap: 0.25rem;
 	}
 
+	.stat-server-wrapper {
+		position: relative;
+		display: inline-block;
+	}
+
 	.stat-server {
 		display: inline-block;
 		padding: 0.25rem 0.6rem;
@@ -768,7 +955,15 @@
 		background: rgba(79, 128, 255, 0.12);
 		border: 1px solid rgba(79, 128, 255, 0.25);
 		color: #c8d2fb;
+		cursor: pointer;
+		transition: background-color 0.2s;
 	}
+
+	.stat-server:hover {
+		background-color: rgba(79, 128, 255, 0.2);
+	}
+
+
 
 	.stat-body {
 		display: flex;
