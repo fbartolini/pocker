@@ -6,6 +6,13 @@ import { getDockerClient } from './docker-client';
 import { friendlyImageName, getImageBase, parseImageReference } from './image';
 import { resolveDescription, resolveIcon } from './metadata';
 import { compareVersions } from '$lib/utils/version';
+
+// Check if a version string looks like a semantic version (e.g., 1.0.6, v2.3.4)
+const isSemanticVersion = (value?: string | null): boolean => {
+	if (!value) return false;
+	// Match patterns like: 1.0.6, v1.0.6, 2.3.4-beta, etc.
+	return /^v?\d+\.\d+\.\d+/.test(value.trim());
+};
 import { generateColorForString } from '$lib/utils/colors';
 
 const settings = getServerSettings();
@@ -119,6 +126,18 @@ const toServerInstance = (
 		}
 	}
 
+	// Extract image digest for version detection
+	// Priority: digest from Image string (@sha256:...) > ImageID
+	let imageDigest: string | null = null;
+	if (container.Image && container.Image.includes('@sha256:')) {
+		const digestMatch = container.Image.match(/@(sha256:[a-f0-9]+)/);
+		if (digestMatch) {
+			imageDigest = digestMatch[1];
+		}
+	} else if (container.ImageID && container.ImageID.startsWith('sha256:')) {
+		imageDigest = container.ImageID;
+	}
+
 	return {
 		sourceId: source.name,
 		sourceLabel: source.displayName,
@@ -127,6 +146,7 @@ const toServerInstance = (
 		state: container.State ?? 'unknown',
 		exitCode,
 		version: labels['org.opencontainers.image.version'],
+		imageDigest,
 		uiUrl: preferredUrl,
 		ports,
 		color
@@ -584,10 +604,35 @@ export const getAggregatedApps = async (): Promise<AppsResponse> => {
 			const displayName = labels['homelab.display'] ?? appName;
 			const appId = resolveAppId(labels, imageBase, appName);
 			
-			const version =
-				labels['org.opencontainers.image.version'] ??
-				ref.tag ??
-				(container.Image.includes('@sha') ? container.Image.split('@')[1]?.slice(0, 12) : undefined);
+			// Extract version synchronously (async resolution happens later via /api/versions)
+			// Priority: explicit version label > tag (if not "latest"/"nightly") > tag/digest fallback
+			// Semantic versions from registries are resolved asynchronously to avoid blocking
+			let version: string | null = null;
+			const versionLabel = labels['org.opencontainers.image.version'];
+			const imageDigest = container.ImageID?.startsWith('sha256:') 
+				? container.ImageID 
+				: (container.Image.includes('@sha256:') 
+					? container.Image.match(/@(sha256:[a-f0-9]+)/)?.[1] 
+					: null);
+			
+			// Use synchronous sources only - async resolution happens via /api/versions endpoint
+			if (versionLabel && isSemanticVersion(versionLabel)) {
+				// Use label if it's already a semantic version
+				version = versionLabel;
+			} else if (ref.tag && ref.tag !== 'latest' && ref.tag !== 'nightly') {
+				// Use the tag if it's not "latest" or "nightly"
+				version = ref.tag;
+			} else if (versionLabel) {
+				// Use label even if not semantic (e.g., "nightly") as temporary version
+				version = versionLabel;
+			} else if (ref.tag) {
+				// For "latest" or "nightly" tags, use the tag itself as temporary version
+				version = ref.tag;
+			} else if (imageDigest) {
+				// Last resort: Use shortened digest (first 12 chars) as temporary version identifier
+				// This will be replaced by semantic version from async resolution if available
+				version = imageDigest.replace('sha256:', '').slice(0, 12);
+			}
 			const descriptionHint = labels['homelab.description'];
 			const iconHint = labels['homelab.icon'];
 

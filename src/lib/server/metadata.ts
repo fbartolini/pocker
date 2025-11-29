@@ -272,6 +272,320 @@ const fetchRepositoryMetadata = async (ref: ImageReference): Promise<HubMetadata
 	}
 };
 
+// Cache for tag lookups by digest
+const tagCache = new Map<string, CacheEntry<string | null>>();
+
+// Export function to clear version cache (useful for testing)
+export const clearVersionCache = () => {
+	tagCache.clear();
+	console.log('[metadata] Version cache cleared');
+};
+
+// Check if a tag looks like a semantic version (e.g., 1.0.6, v2.3.4)
+const isSemanticVersion = (tag: string): boolean => {
+	// Match patterns like: 1.0.6, v1.0.6, 2.3.4-beta, etc.
+	return /^v?\d+\.\d+\.\d+/.test(tag);
+};
+
+// Resolve version tag from digest by querying Docker Hub or GitHub Container Registry
+export const resolveVersionFromDigest = async (
+	ref: ImageReference,
+	digest: string
+): Promise<string | null> => {
+	if (!settings.dockerHubEnabled) return null;
+	
+	// Determine which registry to query
+	const isDockerHub = !ref.registry || 
+		ref.registry.toLowerCase().trim() === 'docker.io' || 
+		ref.registry.toLowerCase().trim() === 'index.docker.io';
+	const isGHCR = ref.registry?.toLowerCase().trim() === 'ghcr.io';
+	
+	if (!isDockerHub && !isGHCR) {
+		logDebug('skipping unsupported registry', ref.registry);
+		return null;
+	}
+	
+	if (isDockerHub) {
+		return resolveVersionFromDigestDockerHub(ref, digest);
+	} else if (isGHCR) {
+		return resolveVersionFromDigestGHCR(ref, digest);
+	}
+	
+	return null;
+};
+
+// Resolve version tag from digest by querying Docker Hub
+const resolveVersionFromDigestDockerHub = async (
+	ref: ImageReference,
+	digest: string
+): Promise<string | null> => {
+	
+	const namespaceSegments = ref.repository.split('/');
+	const repo = namespaceSegments.pop()!;
+	const namespace = namespaceSegments.pop() ?? 'library';
+	const cacheKey = `tag:${namespace}/${repo}:${digest}`;
+
+	const cached = tagCache.get(cacheKey);
+	if (cached && cached.expires > Date.now()) {
+		logDebug('tag cache hit', cacheKey, cached.value);
+		return cached.value;
+	}
+
+		try {
+		// Query Docker Hub tags API - paginate through to find tags matching the digest
+		let page = 1;
+		let foundTag: string | null = null;
+		const semanticVersions: string[] = [];
+		
+		// Normalize digest format for comparison (remove "sha256:" prefix if present)
+		const normalizedDigest = digest.replace(/^sha256:/, '');
+		
+		while (page <= 5) { // Limit to 5 pages to avoid infinite loops
+			const response = await fetch(
+				`https://hub.docker.com/v2/repositories/${namespace}/${repo}/tags?page=${page}&page_size=100`
+			);
+			
+			if (response.status === 404) {
+				logDebug('tags 404', `${namespace}/${repo}`);
+				break;
+			}
+			
+			if (!response.ok) {
+				throw new Error(`Docker Hub tags API responded with ${response.status}`);
+			}
+
+			const payload = (await response.json()) as {
+				results?: Array<{
+					name: string;
+					digest?: string;
+					images?: Array<{ digest?: string }>;
+				}>;
+				next?: string | null;
+			};
+
+			if (!payload.results || payload.results.length === 0) {
+				break;
+			}
+
+			// Look for tags matching the digest
+			for (const tag of payload.results) {
+				// Check if tag's digest matches (could be in tag.digest or tag.images[].digest)
+				// Docker Hub API returns digests in format "sha256:..." or just the hash
+				const tagDigests = [
+					tag.digest,
+					...((tag.images as Array<{ digest?: string }>) || []).map(img => img.digest)
+				].filter(Boolean) as string[];
+				
+				const matches = tagDigests.some(td => {
+					const normalized = td.replace(/^sha256:/, '');
+					return normalized === normalizedDigest;
+				});
+				
+				if (matches) {
+					const tagName = tag.name;
+					
+					// Prefer semantic versions
+					if (isSemanticVersion(tagName)) {
+						semanticVersions.push(tagName);
+					} else if (!foundTag && tagName !== 'latest') {
+						// Keep first non-latest tag as fallback
+						foundTag = tagName;
+					}
+				}
+			}
+
+			// If no next page, stop
+			if (!payload.next) {
+				break;
+			}
+
+			page++;
+		}
+
+		// After collecting all semantic versions, sort them and use the latest one
+		if (semanticVersions.length > 0) {
+			// Sort semantic versions: remove 'v' prefix and compare as semantic versions
+			semanticVersions.sort((a, b) => {
+				const aClean = a.replace(/^v/i, '');
+				const bClean = b.replace(/^v/i, '');
+				const aParts = aClean.split('.').map(Number);
+				const bParts = bClean.split('.').map(Number);
+				for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
+					const aVal = aParts[i] || 0;
+					const bVal = bParts[i] || 0;
+					if (aVal !== bVal) return bVal - aVal; // Descending order (latest first)
+				}
+				return 0;
+			});
+			foundTag = semanticVersions[0];
+		}
+
+		// Cache the result permanently (digests are immutable, so the mapping never changes)
+		// A digest uniquely identifies an image, so once we know digest X maps to version Y, that's permanent
+		// Use a very long TTL (1 year) - effectively permanent but allows cleanup if needed
+		const ttl = 365 * 24 * 60 * 60 * 1000; // 1 year
+		tagCache.set(cacheKey, { value: foundTag, expires: Date.now() + ttl });
+		
+		if (foundTag) {
+			logDebug('resolved version from digest', `${namespace}/${repo}`, digest, foundTag);
+		}
+		
+		return foundTag;
+	} catch (error) {
+		console.warn(`[metadata] Failed to resolve version from digest for ${namespace}/${repo}:${digest}:`, error);
+		return null;
+	}
+};
+
+// Resolve version tag from digest by querying GitHub Container Registry
+const resolveVersionFromDigestGHCR = async (
+	ref: ImageReference,
+	digest: string
+): Promise<string | null> => {
+	// GitHub Container Registry format: ghcr.io/owner/repo or ghcr.io/owner/repo/image
+	const namespaceSegments = ref.repository.split('/');
+	const owner = namespaceSegments[0];
+	const repo = namespaceSegments.length > 1 ? namespaceSegments[1] : namespaceSegments[0];
+	const imageName = namespaceSegments.length > 2 ? namespaceSegments.slice(1).join('/') : repo;
+	
+	const cacheKey = `tag:ghcr.io/${owner}/${imageName}:${digest}`;
+
+	const cached = tagCache.get(cacheKey);
+	if (cached && cached.expires > Date.now()) {
+		logDebug('tag cache hit (GHCR)', cacheKey, cached.value);
+		return cached.value;
+	}
+
+	try {
+		// Use Docker Registry HTTP API v2 for GHCR (works for public images without auth)
+		// First, get a token (optional for public repos, but some endpoints may require it)
+		let bearerToken: string | null = null;
+		try {
+			const tokenResponse = await fetch(
+				`https://ghcr.io/token?service=ghcr.io&scope=repository:${owner}/${imageName}:pull`
+			);
+			if (tokenResponse.ok) {
+				const tokenData = (await tokenResponse.json()) as { token?: string };
+				bearerToken = tokenData.token || null;
+			}
+		} catch {
+			// Token fetch failed, continue without auth (public repos should work)
+		}
+
+		// List all tags
+		const headers: HeadersInit = {
+			'Accept': 'application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+		};
+		if (bearerToken) {
+			headers['Authorization'] = `Bearer ${bearerToken}`;
+		}
+
+		const tagsResponse = await fetch(
+			`https://ghcr.io/v2/${owner}/${imageName}/tags/list`,
+			{ headers }
+		);
+
+		if (tagsResponse.status === 404) {
+			logDebug('GHCR tags 404', `${owner}/${imageName}`);
+			return null;
+		}
+
+		if (!tagsResponse.ok) {
+			throw new Error(`GHCR tags API responded with ${tagsResponse.status}`);
+		}
+
+		const tagsData = (await tagsResponse.json()) as {
+			tags?: string[];
+		};
+
+		if (!tagsData.tags || tagsData.tags.length === 0) {
+			return null;
+		}
+
+		// Normalize digest format for comparison
+		const normalizedDigest = digest.replace(/^sha256:/, '');
+		let foundTag: string | null = null;
+		const semanticVersions: string[] = [];
+
+		// Check each tag to see if it matches the digest
+		// Limit to first 100 tags to avoid too many API calls
+		for (const tag of tagsData.tags.slice(0, 100)) {
+			try {
+				// Get manifest for this tag
+				const manifestHeaders: HeadersInit = {
+					'Accept': 'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+				};
+				if (bearerToken) {
+					manifestHeaders['Authorization'] = `Bearer ${bearerToken}`;
+				}
+
+				const manifestResponse = await fetch(
+					`https://ghcr.io/v2/${owner}/${imageName}/manifests/${tag}`,
+					{ headers: manifestHeaders }
+				);
+
+				if (!manifestResponse.ok) {
+					continue;
+				}
+
+				const manifest = (await manifestResponse.json()) as {
+					config?: { digest?: string };
+					digest?: string;
+				};
+
+				// Check if the manifest digest or config digest matches
+				const manifestDigest = manifest.digest || manifest.config?.digest;
+				if (manifestDigest) {
+					const normalized = manifestDigest.replace(/^sha256:/, '');
+					if (normalized === normalizedDigest) {
+						// Prefer semantic versions
+						if (isSemanticVersion(tag)) {
+							semanticVersions.push(tag);
+						} else if (!foundTag && tag !== 'latest') {
+							// Keep first non-latest tag as fallback
+							foundTag = tag;
+						}
+					}
+				}
+			} catch {
+				// Skip this tag if manifest fetch fails
+				continue;
+			}
+		}
+
+		// After collecting all semantic versions, sort them and use the latest one
+		if (semanticVersions.length > 0) {
+			// Sort semantic versions: remove 'v' prefix and compare as semantic versions
+			semanticVersions.sort((a, b) => {
+				const aClean = a.replace(/^v/i, '');
+				const bClean = b.replace(/^v/i, '');
+				const aParts = aClean.split('.').map(Number);
+				const bParts = bClean.split('.').map(Number);
+				for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
+					const aVal = aParts[i] || 0;
+					const bVal = bParts[i] || 0;
+					if (aVal !== bVal) return bVal - aVal; // Descending order (latest first)
+				}
+				return 0;
+			});
+			foundTag = semanticVersions[0];
+		}
+
+		// Cache the result permanently (digests are immutable)
+		const ttl = 365 * 24 * 60 * 60 * 1000; // 1 year
+		tagCache.set(cacheKey, { value: foundTag, expires: Date.now() + ttl });
+		
+		if (foundTag) {
+			logDebug('resolved version from digest (GHCR)', `${owner}/${imageName}`, digest, foundTag);
+		}
+		
+		return foundTag;
+	} catch (error) {
+		console.warn(`[metadata] Failed to resolve version from digest for ghcr.io/${owner}/${imageName}:${digest}:`, error);
+		return null;
+	}
+};
+
 const fetchProductMetadata = async (ref: ImageReference): Promise<HubMetadata | null> => {
 	if (!settings.dockerHubEnabled) return null;
 	const cacheKey = `product:${ref.repository}`;

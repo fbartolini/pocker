@@ -18,6 +18,7 @@ export type ServerInstance = {
 	state: string;
 	exitCode?: number | null; // Exit code for stopped containers (null if running or unknown)
 	version?: string | null;
+	imageDigest?: string | null; // Full SHA256 digest (e.g., sha256:abc123...) for version detection
 	uiUrl?: string | null;
 	ports: ExposedPort[];
 	color?: string; // Hex color code for UI display

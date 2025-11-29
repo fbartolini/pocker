@@ -2,7 +2,7 @@
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
 	import type { AggregatedApp, AppsResponse } from '$lib/types';
-	import { compareVersions, formatVersionLabel } from '$lib/utils/version';
+	import { compareVersions, formatVersionLabel, isVersionDigest } from '$lib/utils/version';
 	import { formatBytes, formatPercent } from '$lib/utils/format';
 	import Tooltip from '$lib/components/Tooltip.svelte';
 	import ContainerStatsTooltip from '$lib/components/ContainerStatsTooltip.svelte';
@@ -24,6 +24,7 @@
 	let hoverTimeout: ReturnType<typeof setTimeout> | null = null;
 	let hoveredAppId: string | null = null;
 	let statsFetched = false; // Track if we've fetched stats to avoid duplicate calls
+	let versionsFetched = false; // Track if we've fetched versions to avoid duplicate calls
 	let hoveredContainer: { sourceId: string; containerId: string; containerName: string; element: HTMLElement | null } | null = null;
 	let containerStats: Record<string, any> = {}; // Cache of container stats
 	let containerStatsTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -37,10 +38,13 @@
 		document.body.dataset.embed = embedMode ? 'true' : 'false';
 	}
 	
-	// Fetch memory stats asynchronously after initial load (only once)
+	// Fetch memory stats and versions asynchronously after initial load (only once)
 	onMount(() => {
 		if (snapshot.serverStats && snapshot.serverStats.length > 0 && !statsFetched) {
 			fetchMemoryStats();
+		}
+		if (snapshot.apps && snapshot.apps.length > 0 && !versionsFetched) {
+			fetchVersions();
 		}
 	});
 
@@ -75,6 +79,60 @@
 			}
 		} catch (error) {
 			// Silently fail - stats are optional
+		}
+	};
+
+	const fetchVersions = async () => {
+		if (versionsFetched) return; // Don't fetch multiple times
+		versionsFetched = true;
+		
+		try {
+			const response = await fetch('/api/versions');
+			if (!response.ok) {
+				return; // Silently fail - versions are optional
+			}
+			const data = await response.json();
+			const versions = data.versions || {};
+			
+			// Update container versions and recalculate app versions
+			if (snapshot.apps) {
+				snapshot.apps = snapshot.apps.map((app) => {
+					let versionsUpdated = false;
+					const updatedContainers = app.containers.map((container) => {
+						const containerKey = `${container.sourceId}:${container.containerId}`;
+						const resolvedVersion = versions[containerKey];
+						if (resolvedVersion && resolvedVersion !== container.version) {
+							versionsUpdated = true;
+							return {
+								...container,
+								version: resolvedVersion
+							};
+						}
+						return container;
+					});
+					
+					if (versionsUpdated) {
+						// Recalculate versions array and latestVersion
+						const allVersions = new Set<string>();
+						updatedContainers.forEach((c) => {
+							if (c.version) allVersions.add(c.version);
+						});
+						const versionsArray = Array.from(allVersions).sort((a, b) => compareVersions(a, b));
+						const latestVersion = versionsArray.length > 0 ? versionsArray[versionsArray.length - 1] : null;
+						
+						return {
+							...app,
+							containers: updatedContainers,
+							versions: versionsArray,
+							latestVersion
+						};
+					}
+					
+					return app;
+				});
+			}
+		} catch (error) {
+			// Silently fail - versions are optional
 		}
 	};
 
@@ -342,21 +400,25 @@
 					<div class="chips">
 						{#each app.containers as server, index}
 							{@const destination = chipUrl(app, index)}
+							{@const hasVersionDiff = app.versions.length > 1 && server.version && server.version !== app.latestVersion}
 							{@const isOutdated =
 								app.latestVersion &&
 								server.version &&
 								compareVersions(server.version, app.latestVersion) < 0}
-							{@const showVersion = app.versions.length > 1 && isOutdated}
+							{@const showVersion = hasVersionDiff && !isVersionDigest(server.version)}
+							{@const isDigestVersion = isVersionDigest(server.version)}
 							{@const isRunning = server.state === 'running'}
 							{@const isCrashed = !isRunning && server.exitCode !== null && server.exitCode !== 0}
 							{@const cacheKey = `${server.sourceId}-${server.containerId}`}
 							{@const stats = containerStats[cacheKey]}
 							{@const isHovered = hoveredContainer?.sourceId === server.sourceId && hoveredContainer?.containerId === server.containerId}
+							{@const versionTooltip = isDigestVersion && server.version ? `Image digest: ${server.version}` : null}
 							<div class="chip-wrapper">
 								<button
 									type="button"
 									class="tag chip"
-									class:outdated={isOutdated}
+									class:outdated={isOutdated || (hasVersionDiff && isDigestVersion)}
+									class:version-diff={hasVersionDiff && !isOutdated}
 									class:stopped={!isRunning && !isCrashed}
 									class:crashed={isCrashed}
 									disabled={!destination}
@@ -366,12 +428,15 @@
 									}}
 									on:mouseenter={(e) => handleContainerHover(server.sourceId, server.containerId, server.containerName, e)}
 									on:mouseleave={handleContainerLeave}
-									title={destination ? 'Open service' : 'No exposed endpoint detected'}
+									title={versionTooltip || (destination ? 'Open service' : 'No exposed endpoint detected')}
 								>
 									<span class="chip-status" class:running={isRunning} class:stopped={!isRunning && !isCrashed} class:crashed={isCrashed}></span>
 									<span class="chip-name">{server.sourceLabel}</span>
 									{#if showVersion && server.version}
 										<span class="chip-version">{formatVersionLabel(server.version)}</span>
+									{/if}
+									{#if hasVersionDiff && isDigestVersion}
+										<span class="chip-version-indicator" title={versionTooltip || ''}>⚠</span>
 									{/if}
 								</button>
 								{#if isHovered && isRunning && stats && hoveredContainer?.element}
@@ -761,6 +826,18 @@
 		color: #ff9b9b;
 		text-transform: none;
 		font-size: 0.72rem;
+	}
+
+	.chip-version-indicator {
+		font-size: 0.7rem;
+		color: #ffd43b;
+		margin-left: 0.2rem;
+		line-height: 1;
+	}
+
+	.tag.chip.version-diff {
+		border-color: rgba(255, 212, 59, 0.5);
+		background: rgba(255, 212, 59, 0.1);
 	}
 
 	.chip-wrapper {
