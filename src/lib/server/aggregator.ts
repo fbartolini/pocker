@@ -5,14 +5,7 @@ import { getServerSettings, type SourceConfig } from './config';
 import { getDockerClient } from './docker-client';
 import { friendlyImageName, getImageBase, parseImageReference } from './image';
 import { resolveDescription, resolveIcon } from './metadata';
-import { compareVersions } from '$lib/utils/version';
-
-// Check if a version string looks like a semantic version (e.g., 1.0.6, v2.3.4)
-const isSemanticVersion = (value?: string | null): boolean => {
-	if (!value) return false;
-	// Match patterns like: 1.0.6, v1.0.6, 2.3.4-beta, etc.
-	return /^v?\d+\.\d+\.\d+/.test(value.trim());
-};
+import { compareVersions, isSemanticVersion } from '$lib/utils/version';
 import { generateColorForString } from '$lib/utils/colors';
 
 const settings = getServerSettings();

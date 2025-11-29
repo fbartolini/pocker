@@ -8,6 +8,7 @@ import {
 	parseImageReference,
 	type ImageReference
 } from './image';
+import { isSemanticVersion } from '$lib/utils/version';
 
 const settings = getServerSettings();
 
@@ -281,11 +282,6 @@ export const clearVersionCache = () => {
 	console.log('[metadata] Version cache cleared');
 };
 
-// Check if a tag looks like a semantic version (e.g., 1.0.6, v2.3.4)
-const isSemanticVersion = (tag: string): boolean => {
-	// Match patterns like: 1.0.6, v1.0.6, 2.3.4-beta, etc.
-	return /^v?\d+\.\d+\.\d+/.test(tag);
-};
 
 // Resolve version tag from digest by querying Docker Hub or GitHub Container Registry
 export const resolveVersionFromDigest = async (
@@ -392,6 +388,12 @@ const resolveVersionFromDigestDockerHub = async (
 						foundTag = tagName;
 					}
 				}
+			}
+
+			// Early exit: if we found semantic versions and checked at least 2 pages, stop
+			// This prevents unnecessary API calls when we already have what we need
+			if (semanticVersions.length > 0 && page >= 2) {
+				break;
 			}
 
 			// If no next page, stop
@@ -503,53 +505,103 @@ const resolveVersionFromDigestGHCR = async (
 		}
 
 		// Normalize digest format for comparison
+		// The container's ImageID is the config digest, not the manifest digest
 		const normalizedDigest = digest.replace(/^sha256:/, '');
 		let foundTag: string | null = null;
 		const semanticVersions: string[] = [];
+		
+		if (settings.metadataDebug) {
+			logDebug(`[metadata] GHCR: Searching for digest ${normalizedDigest.substring(0, 20)}... in ${owner}/${imageName}, checking ${tagsData.tags.length} tags`);
+		}
 
 		// Check each tag to see if it matches the digest
-		// Limit to first 100 tags to avoid too many API calls
-		for (const tag of tagsData.tags.slice(0, 100)) {
-			try {
-				// Get manifest for this tag
-				const manifestHeaders: HeadersInit = {
-					'Accept': 'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
-				};
-				if (bearerToken) {
-					manifestHeaders['Authorization'] = `Bearer ${bearerToken}`;
-				}
+		// Limit to first 50 tags and process in parallel batches for better performance
+		const tagsToCheck = tagsData.tags.slice(0, 50);
+		const BATCH_SIZE = 10; // Process 10 tags in parallel
+		
+		// Process tags in parallel batches
+		for (let i = 0; i < tagsToCheck.length; i += BATCH_SIZE) {
+			const batch = tagsToCheck.slice(i, i + BATCH_SIZE);
+			const batchPromises = batch.map(async (tag) => {
+				try {
+					// Get manifest for this tag
+					const manifestHeaders: HeadersInit = {
+						'Accept': 'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+					};
+					if (bearerToken) {
+						manifestHeaders['Authorization'] = `Bearer ${bearerToken}`;
+					}
 
-				const manifestResponse = await fetch(
-					`https://ghcr.io/v2/${owner}/${imageName}/manifests/${tag}`,
-					{ headers: manifestHeaders }
-				);
+					const manifestResponse = await fetch(
+						`https://ghcr.io/v2/${owner}/${imageName}/manifests/${tag}`,
+						{ headers: manifestHeaders }
+					);
 
-				if (!manifestResponse.ok) {
-					continue;
-				}
+					if (!manifestResponse.ok) {
+						return null;
+					}
 
-				const manifest = (await manifestResponse.json()) as {
-					config?: { digest?: string };
-					digest?: string;
-				};
+					const manifest = (await manifestResponse.json()) as {
+						config?: { digest?: string };
+						digest?: string;
+					};
 
-				// Check if the manifest digest or config digest matches
-				const manifestDigest = manifest.digest || manifest.config?.digest;
-				if (manifestDigest) {
-					const normalized = manifestDigest.replace(/^sha256:/, '');
-					if (normalized === normalizedDigest) {
-						// Prefer semantic versions
-						if (isSemanticVersion(tag)) {
-							semanticVersions.push(tag);
-						} else if (!foundTag && tag !== 'latest') {
-							// Keep first non-latest tag as fallback
-							foundTag = tag;
+					// For GHCR, the container's ImageID is typically the config digest
+					const responseDigest = manifestResponse.headers.get('docker-content-digest');
+					const configDigest = manifest.config?.digest;
+					const manifestDigest = manifest.digest;
+					
+					// Normalize and compare digests - prioritize config digest as that's usually ImageID
+					const digestsToCheck = [
+						configDigest,  // This is most likely what ImageID is
+						responseDigest, // Manifest digest from header
+						manifestDigest  // Manifest digest from body
+					].filter(Boolean) as string[];
+					
+					const matches = digestsToCheck.some(d => {
+						if (!d) return false;
+						const normalized = d.replace(/^sha256:/, '');
+						return normalized === normalizedDigest;
+					});
+					
+					if (matches) {
+						if (settings.metadataDebug) {
+							logDebug(`[metadata] Found matching digest for tag ${tag} in ${owner}/${imageName}`, {
+								tag,
+								configDigest,
+								responseDigest,
+								manifestDigest,
+								searchingFor: normalizedDigest.substring(0, 20) + '...'
+							});
 						}
+						return { tag, isSemantic: isSemanticVersion(tag) };
+					}
+					return null;
+				} catch {
+					// Skip this tag if manifest fetch fails
+					return null;
+				}
+			});
+			
+			const batchResults = await Promise.all(batchPromises);
+			
+			// Process results from this batch
+			for (const result of batchResults) {
+				if (result) {
+					if (result.isSemantic) {
+						semanticVersions.push(result.tag);
+					} else if (!foundTag && result.tag !== 'latest') {
+						foundTag = result.tag;
+					} else if (result.tag === 'latest' && !foundTag) {
+						foundTag = result.tag;
 					}
 				}
-			} catch {
-				// Skip this tag if manifest fetch fails
-				continue;
+			}
+			
+			// Early exit: if we found a semantic version and we've checked enough tags, stop
+			// We still want to check a few more to find the latest semantic version
+			if (semanticVersions.length > 0 && i >= 20) {
+				break;
 			}
 		}
 
@@ -569,10 +621,18 @@ const resolveVersionFromDigestGHCR = async (
 				return 0;
 			});
 			foundTag = semanticVersions[0];
+		} else if (!foundTag) {
+			// If no semantic version and no other tag found, check if 'latest' matches
+			// This handles the case where the container is running 'latest' but there's no semantic version with that digest
+			// We'll return null so the UI can show 'latest' from the tag
+			if (settings.metadataDebug) {
+				logDebug(`[metadata] No semantic version found for ${owner}/${imageName} with digest ${digest.substring(0, 20)}... - checked ${tagsData.tags.length} tags`);
+			}
 		}
 
 		// Cache the result permanently (digests are immutable)
-		const ttl = 365 * 24 * 60 * 60 * 1000; // 1 year
+		// Cache null results too (with shorter TTL) to avoid repeated failed lookups
+		const ttl = foundTag ? 365 * 24 * 60 * 60 * 1000 : 3600000; // 1 year if found, 1 hour if not
 		tagCache.set(cacheKey, { value: foundTag, expires: Date.now() + ttl });
 		
 		if (foundTag) {

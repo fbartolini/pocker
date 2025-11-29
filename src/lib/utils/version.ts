@@ -103,3 +103,10 @@ export const isVersionDigest = (value?: string | null): boolean => {
 	return normalized ? isDigest(normalized) : false;
 };
 
+// Check if a version string looks like a semantic version (e.g., 1.0.6, v2.3.4)
+export const isSemanticVersion = (value?: string | null): boolean => {
+	if (!value) return false;
+	// Match patterns like: 1.0.6, v1.0.6, 2.3.4-beta, etc.
+	return /^v?\d+\.\d+\.\d+/.test(value.trim());
+};
+
