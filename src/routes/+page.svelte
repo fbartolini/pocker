@@ -28,6 +28,7 @@
 	let hoveredContainer: { sourceId: string; containerId: string; containerName: string; element: HTMLElement | null } | null = null;
 	let containerStats: Record<string, any> = {}; // Cache of container stats
 	let containerStatsTimeout: ReturnType<typeof setTimeout> | null = null;
+	let hideTooltipTimeout: ReturnType<typeof setTimeout> | null = null;
 	let hoveredServer: { sourceLabel: string; element: HTMLElement | null } | null = null; // Track which server is being hovered
 	let serverDetails: Record<string, { topContainers: Array<{ name: string; memory: number }>; memoryTotal: number }> = {};
 
@@ -211,10 +212,26 @@
 
 
 	const handleContainerLeave = () => {
-		if (containerStatsTimeout) {
-			clearTimeout(containerStatsTimeout);
-			containerStatsTimeout = null;
+		// Add a small delay before hiding to allow mouse to move to tooltip
+		if (hideTooltipTimeout) {
+			clearTimeout(hideTooltipTimeout);
 		}
+		hideTooltipTimeout = setTimeout(() => {
+			hoveredContainer = null;
+			hideTooltipTimeout = null;
+		}, 100); // 100ms delay to allow moving to tooltip
+	};
+	
+	const handleTooltipEnter = () => {
+		// Cancel hide timeout when mouse enters tooltip
+		if (hideTooltipTimeout) {
+			clearTimeout(hideTooltipTimeout);
+			hideTooltipTimeout = null;
+		}
+	};
+	
+	const handleTooltipLeave = () => {
+		// Hide tooltip when mouse leaves it
 		hoveredContainer = null;
 	};
 
@@ -303,7 +320,7 @@
 		<header class="toolbar">
 			<div class="filters">
 				<label>
-					App
+					<!-- App -->
 					<select bind:value={selectedApp}>
 						<option value="all">All apps</option>
 						{#each snapshot.appFilters as option}
@@ -312,7 +329,7 @@
 					</select>
 				</label>
 				<label>
-					Server
+					<!-- Server -->
 					<select bind:value={selectedServer}>
 						<option value="all">All servers</option>
 						{#each snapshot.serverFilters as option}
@@ -322,7 +339,7 @@
 				</label>
 				<label class="checkbox-label">
 					<input type="checkbox" bind:checked={showIssuesOnly} />
-					<span>Show only issues</span>
+					issues only
 				</label>
 			</div>
 			<div class="actions">
@@ -440,9 +457,14 @@
 									{/if}
 								</button>
 								{#if isHovered && isRunning && stats && hoveredContainer?.element}
-									<Tooltip target={hoveredContainer.element}>
-										<ContainerStatsTooltip containerName={server.containerName} {stats} />
-									</Tooltip>
+									<div 
+										on:mouseenter={handleTooltipEnter}
+										on:mouseleave={handleTooltipLeave}
+									>
+										<Tooltip target={hoveredContainer.element}>
+											<ContainerStatsTooltip containerName={server.containerName} {stats} ports={server.ports} />
+										</Tooltip>
+									</div>
 								{/if}
 							</div>
 						{/each}
@@ -853,11 +875,14 @@
 	}
 
 	.checkbox-label {
-		display: flex;
+		display: inline-flex;
+		flex-direction: row;
 		align-items: center;
 		gap: 0.5rem;
 		cursor: pointer;
 		user-select: none;
+		white-space: nowrap;
+		flex-shrink: 0;
 	}
 
 	.checkbox-label input[type="checkbox"] {

@@ -60,7 +60,7 @@
 	class="tooltip"
 	class:above={isAbove}
 	class:below={isBelow}
-	style="position: fixed; z-index: 1000; pointer-events: none;"
+	style="position: fixed; z-index: 1000; pointer-events: auto;"
 >
 	<slot />
 </div>

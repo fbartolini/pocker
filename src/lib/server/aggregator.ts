@@ -34,14 +34,39 @@ const sanitizeUrl = (value?: string | null): string | null => {
 	}
 };
 
-const buildPortUrl = (baseUrl: string | null, port: ContainerPort): string | null => {
-	if (!baseUrl) return null;
+const buildPortUrl = (port: ContainerPort, sourceEndpoint?: string): string | null => {
 	const resolvedPort = port.PublicPort ?? port.PrivatePort;
 	if (!resolvedPort) return null;
+	
 	try {
-		const url = new URL(baseUrl);
-		url.port = String(resolvedPort);
-		return url.toString();
+		// Determine the hostname/IP to use
+		let hostname: string;
+		if (port.IP && port.IP !== '0.0.0.0' && port.IP !== '::') {
+			// Use the IP from the port if it's a valid, specific IP address
+			hostname = port.IP;
+		} else {
+			// If port is bound to 0.0.0.0 (all interfaces), try to get hostname from source endpoint
+			// Otherwise default to localhost
+			if (sourceEndpoint) {
+				try {
+					const endpointUrl = new URL(sourceEndpoint);
+					hostname = endpointUrl.hostname;
+					// Still default to localhost if endpoint hostname is invalid
+					if (hostname === '0.0.0.0' || hostname === '::' || !hostname) {
+						hostname = 'localhost';
+					}
+				} catch {
+					hostname = 'localhost';
+				}
+			} else {
+				hostname = 'localhost';
+			}
+		}
+		
+		// Determine protocol - default to http, but use https for common secure ports
+		const protocol = resolvedPort === 443 || resolvedPort === 8443 ? 'https' : 'http';
+		
+		return `${protocol}://${hostname}:${resolvedPort}`;
 	} catch {
 		return null;
 	}
@@ -98,13 +123,20 @@ const toServerInstance = (
 		preferredUrl = buildContainerUrl(baseUiUrl, container, labels);
 	}
 
+	// Build port URLs - use source endpoint to determine hostname if available
+	const sourceEndpoint = source.endpoint || source.socketPath ? undefined : undefined;
 	const ports =
-		container.Ports?.filter((port): port is ContainerPort => Boolean(port))?.map((port) => ({
-			private: port.PrivatePort,
-			public: port.PublicPort,
-			type: port.Type,
-			url: buildPortUrl(baseUiUrl, port)
-		})) ?? [];
+		container.Ports?.filter((port): port is ContainerPort => Boolean(port))
+			?.map((port) => ({
+				private: port.PrivatePort,
+				public: port.PublicPort,
+				type: port.Type,
+				url: buildPortUrl(port, source.endpoint)
+			}))
+			// Filter out duplicate ports (same public port and type)
+			.filter((port, index, self) => 
+				index === self.findIndex(p => p.public === port.public && p.type === port.type)
+			) ?? [];
 
 	// Use source color if defined, otherwise generate one based on source name
 	const color = source.color ?? generateColorForString(source.name);
