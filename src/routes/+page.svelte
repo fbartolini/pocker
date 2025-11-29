@@ -3,22 +3,11 @@
 	import { onMount } from 'svelte';
 	import type { AggregatedApp, AppsResponse } from '$lib/types';
 	import { compareVersions, formatVersionLabel } from '$lib/utils/version';
+	import { formatBytes, formatPercent } from '$lib/utils/format';
 	import Tooltip from '$lib/components/Tooltip.svelte';
-
-	// Format bytes to human-readable format
-	const formatBytes = (bytes: number, decimals: number = 1): string => {
-		if (bytes === 0) return '0 B';
-		const k = 1024;
-		const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-		const i = Math.floor(Math.log(bytes) / Math.log(k));
-		return `${(bytes / Math.pow(k, i)).toFixed(decimals)} ${sizes[i]}`;
-	};
-
-	// Format percentage
-	const formatPercent = (used: number, total: number): string => {
-		if (total === 0) return '0%';
-		return `${((used / total) * 100).toFixed(1)}%`;
-	};
+	import ContainerStatsTooltip from '$lib/components/ContainerStatsTooltip.svelte';
+	import ServerStatsTooltip from '$lib/components/ServerStatsTooltip.svelte';
+	import ResourceBar from '$lib/components/ResourceBar.svelte';
 
 	export let data: { initialData: AppsResponse; embed: boolean; maxWidth: string | null };
 
@@ -387,31 +376,7 @@
 								</button>
 								{#if isHovered && isRunning && stats && hoveredContainer?.element}
 									<Tooltip target={hoveredContainer.element}>
-										<div class="stats-header">{server.containerName}</div>
-										{#if stats.memory}
-											<div class="stats-row">
-												<span class="stats-label">Memory:</span>
-												<span class="stats-value">{formatBytes(stats.memory.usage, 1)} / {formatBytes(stats.memory.limit, 1)} ({stats.memory.percent.toFixed(0)}%)</span>
-											</div>
-										{/if}
-										{#if stats.cpu !== undefined}
-											<div class="stats-row">
-												<span class="stats-label">CPU:</span>
-												<span class="stats-value">{stats.cpu.percent.toFixed(1)}%</span>
-											</div>
-										{/if}
-										{#if stats.network}
-											<div class="stats-row">
-												<span class="stats-label">Network:</span>
-												<span class="stats-value">↓ {formatBytes(stats.network.rx_bytes, 1)} ↑ {formatBytes(stats.network.tx_bytes, 1)}</span>
-											</div>
-										{/if}
-										{#if stats.pids !== undefined}
-											<div class="stats-row">
-												<span class="stats-label">PIDs:</span>
-												<span class="stats-value">{stats.pids}</span>
-											</div>
-										{/if}
+										<ContainerStatsTooltip containerName={server.containerName} {stats} />
 									</Tooltip>
 								{/if}
 							</div>
@@ -439,47 +404,7 @@
 								{#if hoveredServer?.sourceLabel === stats.sourceLabel && hoveredServer?.element}
 									{@const details = serverDetails[stats.sourceId]}
 									<Tooltip target={hoveredServer.element}>
-										<div class="stats-header">{stats.sourceLabel}</div>
-										{#if stats.dockerVersion}
-											<div class="stats-row">
-												<span class="stats-label">Docker:</span>
-												<span class="stats-value">{stats.dockerVersion}</span>
-											</div>
-										{/if}
-										{#if stats.memory}
-											<div class="stats-divider"></div>
-											<div class="stats-row">
-												<span class="stats-label">Memory:</span>
-												<span class="stats-value">{formatBytes(stats.memory.used, 1)} / {formatBytes(stats.memory.total, 1)} ({formatPercent(stats.memory.used, stats.memory.total)})</span>
-											</div>
-											<div class="stats-row">
-												<span class="stats-label">Available:</span>
-												<span class="stats-value">{formatBytes(stats.memory.available, 1)}</span>
-											</div>
-										{/if}
-										{#if stats.storage}
-											<div class="stats-divider"></div>
-											<div class="stats-row">
-												<span class="stats-label">Storage:</span>
-												<span class="stats-value">{formatBytes(stats.storage.used, 1)} / {formatBytes(stats.storage.total, 1)} ({formatPercent(stats.storage.used, stats.storage.total)})</span>
-											</div>
-											<div class="stats-row">
-												<span class="stats-label">Available:</span>
-												<span class="stats-value">{formatBytes(stats.storage.available, 1)}</span>
-											</div>
-										{/if}
-										{#if details && details.topContainers && details.topContainers.length > 0}
-											<div class="stats-divider"></div>
-											<div class="stats-row">
-												<span class="stats-label" style="font-weight: 600;">Top Containers (Memory):</span>
-											</div>
-											{#each details.topContainers as container}
-												<div class="stats-row" style="padding-left: 0.5rem; font-size: 0.68rem;">
-													<span class="stats-label" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px;">{container.name}:</span>
-													<span class="stats-value">{formatBytes(container.memory, 1)}</span>
-												</div>
-											{/each}
-										{/if}
+										<ServerStatsTooltip {stats} {details} />
 									</Tooltip>
 								{/if}
 							</div>
@@ -516,38 +441,10 @@
 						{#if stats.memory || stats.storage}
 							<div class="stat-resources">
 								{#if stats.memory}
-									<div class="resource-item">
-										<div class="resource-header">
-											<span class="resource-label">Memory</span>
-											<span class="resource-percent">{formatPercent(stats.memory.used, stats.memory.total)}</span>
-										</div>
-										<div class="resource-bar">
-											<div 
-												class="resource-bar-fill memory"
-												style="width: {(stats.memory.used / stats.memory.total) * 100}%"
-											></div>
-										</div>
-										<div class="resource-details">
-											<span>{formatBytes(stats.memory.used)}</span> / <span>{formatBytes(stats.memory.total)}</span>
-										</div>
-									</div>
+									<ResourceBar label="Memory" used={stats.memory.used} total={stats.memory.total} type="memory" />
 								{/if}
 								{#if stats.storage}
-									<div class="resource-item">
-										<div class="resource-header">
-											<span class="resource-label">Storage</span>
-											<span class="resource-percent">{formatPercent(stats.storage.used, stats.storage.total)}</span>
-										</div>
-										<div class="resource-bar">
-											<div 
-												class="resource-bar-fill storage"
-												style="width: {(stats.storage.used / stats.storage.total) * 100}%"
-											></div>
-										</div>
-										<div class="resource-details">
-											<span>{formatBytes(stats.storage.used)}</span> / <span>{formatBytes(stats.storage.total)}</span>
-										</div>
-									</div>
+									<ResourceBar label="Storage" used={stats.storage.used} total={stats.storage.total} type="storage" />
 								{/if}
 							</div>
 						{/if}
@@ -1015,56 +912,4 @@
 		gap: 0.75rem;
 	}
 
-	.resource-item {
-		display: flex;
-		flex-direction: column;
-		gap: 0.4rem;
-	}
-
-	.resource-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		font-size: 0.8rem;
-	}
-
-	.resource-label {
-		color: #7f8bad;
-		font-weight: 500;
-	}
-
-	.resource-percent {
-		color: #c8d2fb;
-		font-weight: 600;
-		font-size: 0.75rem;
-	}
-
-	.resource-bar {
-		width: 100%;
-		height: 0.5rem;
-		background: rgba(79, 128, 255, 0.1);
-		border-radius: 999px;
-		overflow: hidden;
-	}
-
-	.resource-bar-fill {
-		height: 100%;
-		border-radius: 999px;
-		transition: width 0.3s ease;
-	}
-
-	.resource-bar-fill.memory {
-		background: linear-gradient(90deg, #51cf66 0%, #ffd43b 70%, #ff4757 100%);
-	}
-
-	.resource-bar-fill.storage {
-		background: linear-gradient(90deg, #4f80ff 0%, #ffd43b 70%, #ff4757 100%);
-	}
-
-	.resource-details {
-		font-size: 0.75rem;
-		color: #7f8bad;
-		display: flex;
-		gap: 0.25rem;
-	}
 </style>

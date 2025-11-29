@@ -1,6 +1,6 @@
 import type Docker from 'dockerode';
 
-import type { AggregatedApp, AppsResponse, ServerInstance } from '$lib/types';
+import type { AggregatedApp, AppsResponse, ServerInstance, ServerStats } from '$lib/types';
 import { getServerSettings, type SourceConfig } from './config';
 import { getDockerClient } from './docker-client';
 import { friendlyImageName, getImageBase, parseImageReference } from './image';
@@ -309,11 +309,20 @@ const fetchSystemInfoForSource = async (source: SourceConfig) => {
 			// If neither is available, we'll calculate from container stats (done later)
 		}
 		
-		if (debug && memoryTotal > 0) {
-			console.log(`[aggregator] Memory parsed for ${source.name}:`, {
-				total: `${(memoryTotal / 1024 / 1024 / 1024).toFixed(2)} GB`,
-				used: memoryUsed > 0 ? `${(memoryUsed / 1024 / 1024 / 1024).toFixed(2)} GB` : 'unknown',
-				available: memoryAvailable > 0 ? `${(memoryAvailable / 1024 / 1024 / 1024).toFixed(2)} GB` : 'unknown'
+		if (debug) {
+			console.log(`[aggregator] System info for ${source.name}:`, {
+				memory: memoryTotal > 0 ? {
+					total: `${(memoryTotal / 1024 / 1024 / 1024).toFixed(2)} GB`,
+					used: memoryUsed > 0 ? `${(memoryUsed / 1024 / 1024 / 1024).toFixed(2)} GB` : 'unknown',
+					available: memoryAvailable > 0 ? `${(memoryAvailable / 1024 / 1024 / 1024).toFixed(2)} GB` : 'unknown'
+				} : 'unknown',
+				cpuCount: info.NCPU,
+				totalImages: info.Images,
+				operatingSystem: info.OperatingSystem,
+				kernelVersion: info.KernelVersion,
+				architecture: info.Architecture,
+				storageDriver: info.Driver,
+				dockerVersion: info.ServerVersion
 			});
 		}
 		
@@ -323,51 +332,61 @@ const fetchSystemInfoForSource = async (source: SourceConfig) => {
 		let storageTotal = 0;
 		let storageUsed = 0;
 		let storageAvailable = 0;
+		let dockerStorageImages = 0;
+		let dockerStorageContainers = 0;
+		let dockerStorageVolumes = 0;
 		
 		try {
 			// Try to get storage info from /system/df endpoint
 			// This endpoint requires SYSTEM=1 in docker-socket-proxy
-			const dfResponse = await new Promise<any>((resolve, reject) => {
-				docker.modem.dial(
-					{
-						path: '/system/df',
-						method: 'GET',
-						statusCodes: {
-							200: true,
-							400: true,
-							500: true
+			// Use docker.df() if available, otherwise fall back to manual dial
+			let dfResponse: any;
+			if (typeof (docker as any).df === 'function') {
+				dfResponse = await (docker as any).df();
+			} else {
+				dfResponse = await new Promise<any>((resolve, reject) => {
+					docker.modem.dial(
+						{
+							path: '/system/df',
+							method: 'GET',
+							statusCodes: {
+								200: true,
+								400: true,
+								500: true
+							}
+						},
+						(err: Error | null, data: any) => {
+							if (err) reject(err);
+							else resolve(data);
 						}
-					},
-					(err: Error | null, data: any) => {
-						if (err) reject(err);
-						else resolve(data);
-					}
-				);
-			});
+					);
+				});
+			}
 			
 			if (dfResponse && typeof dfResponse === 'object') {
-				// Sum up all Docker storage usage
-				// dfResponse contains: Images, Containers, Volumes, BuildCache
-				// Each has: Size (total) and Reclaimable (can be freed)
-				let totalDockerStorage = 0;
+				if (debug) {
+					console.log(`[aggregator] /system/df response for ${source.name}:`, JSON.stringify(dfResponse, null, 2).substring(0, 500));
+				}
 				
-				if (dfResponse.Images && Array.isArray(dfResponse.Images)) {
-					dfResponse.Images.forEach((img: any) => {
-						if (img.Size) totalDockerStorage += img.Size;
-					});
+				// Extract Docker storage breakdown
+				if (dfResponse.ImageUsage && dfResponse.ImageUsage.TotalSize) {
+					dockerStorageImages = dfResponse.ImageUsage.TotalSize;
+				} else if (dfResponse.LayersSize) {
+					dockerStorageImages = dfResponse.LayersSize;
 				}
-				if (dfResponse.Containers && Array.isArray(dfResponse.Containers)) {
-					dfResponse.Containers.forEach((cnt: any) => {
-						if (cnt.SizeRootFs) totalDockerStorage += cnt.SizeRootFs;
-					});
+				
+				if (dfResponse.ContainerUsage && dfResponse.ContainerUsage.TotalSize) {
+					dockerStorageContainers = dfResponse.ContainerUsage.TotalSize;
 				}
-				if (dfResponse.Volumes && Array.isArray(dfResponse.Volumes)) {
-					dfResponse.Volumes.forEach((vol: any) => {
-						if (vol.UsageData && vol.UsageData.Size) {
-							totalDockerStorage += vol.UsageData.Size;
-						}
-					});
+				
+				if (dfResponse.VolumeUsage && dfResponse.VolumeUsage.TotalSize) {
+					dockerStorageVolumes = dfResponse.VolumeUsage.TotalSize;
 				}
+				
+				// Sum up all Docker storage usage for total disk storage calculation
+				let totalDockerStorage = dockerStorageImages + dockerStorageContainers + dockerStorageVolumes;
+				
+				// Also check BuildCache if available
 				if (dfResponse.BuildCache && Array.isArray(dfResponse.BuildCache)) {
 					dfResponse.BuildCache.forEach((cache: any) => {
 						if (cache.Size) totalDockerStorage += cache.Size;
@@ -381,6 +400,9 @@ const fetchSystemInfoForSource = async (source: SourceConfig) => {
 					if (debug) {
 						console.log(`[aggregator] Storage from /system/df for ${source.name}:`, {
 							used: `${(storageUsed / 1024 / 1024 / 1024).toFixed(2)} GB`,
+							images: `${(dockerStorageImages / 1024 / 1024 / 1024).toFixed(2)} GB`,
+							containers: `${(dockerStorageContainers / 1024 / 1024 / 1024).toFixed(2)} GB`,
+							volumes: `${(dockerStorageVolumes / 1024 / 1024 / 1024).toFixed(2)} GB`,
 							note: 'Total disk space not available from /system/df'
 						});
 					}
@@ -483,11 +505,34 @@ const fetchSystemInfoForSource = async (source: SourceConfig) => {
 				used: storageUsed,
 				available: storageAvailable
 			} : undefined,
-			dockerVersion: info.ServerVersion || undefined
+			dockerVersion: info.ServerVersion || undefined,
+			cpuCount: info.NCPU || undefined,
+			totalImages: info.Images || undefined,
+			operatingSystem: info.OperatingSystem || undefined,
+			kernelVersion: info.KernelVersion || undefined,
+			architecture: info.Architecture || undefined,
+			storageDriver: info.Driver || undefined,
+			dockerStorage: (dockerStorageImages > 0 || dockerStorageContainers > 0 || dockerStorageVolumes > 0) ? {
+				images: dockerStorageImages,
+				containers: dockerStorageContainers,
+				volumes: dockerStorageVolumes,
+				total: dockerStorageImages + dockerStorageContainers + dockerStorageVolumes
+			} : undefined
 		};
 	} catch (error) {
 		console.warn(`[aggregator] Unable to fetch system info for ${source.name}:`, error);
-		return { memory: undefined, storage: undefined, dockerVersion: undefined };
+		return { 
+			memory: undefined, 
+			storage: undefined, 
+			dockerVersion: undefined,
+			cpuCount: undefined,
+			totalImages: undefined,
+			operatingSystem: undefined,
+			kernelVersion: undefined,
+			architecture: undefined,
+			storageDriver: undefined,
+			dockerStorage: undefined
+		};
 	}
 };
 
@@ -588,16 +633,7 @@ export const getAggregatedApps = async (): Promise<AppsResponse> => {
 	appList.forEach((app) => app.containers.forEach((inst) => uniqueServers.add(inst.sourceLabel)));
 
 	// Calculate server statistics
-	const serverStatsMap = new Map<string, {
-		sourceId: string;
-		sourceLabel: string;
-		color?: string;
-		total: number;
-		running: number;
-		stopped: number;
-		crashed: number;
-		outdated: number;
-	}>();
+	const serverStatsMap = new Map<string, ServerStats>();
 
 	let totalContainers = 0;
 
@@ -616,8 +652,15 @@ export const getAggregatedApps = async (): Promise<AppsResponse> => {
 				crashed: 0,
 				outdated: 0,
 				dockerVersion: systemInfo?.dockerVersion,
+				cpuCount: systemInfo?.cpuCount,
+				totalImages: systemInfo?.totalImages,
+				operatingSystem: systemInfo?.operatingSystem,
+				kernelVersion: systemInfo?.kernelVersion,
+				architecture: systemInfo?.architecture,
+				storageDriver: systemInfo?.storageDriver,
 				memory: systemInfo?.memory,
-				storage: systemInfo?.storage
+				storage: systemInfo?.storage,
+				dockerStorage: systemInfo?.dockerStorage
 			};
 
 			existing.total++;

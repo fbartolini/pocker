@@ -46,6 +46,12 @@ export type ServerStats = {
 	crashed: number;
 	outdated: number;
 	dockerVersion?: string;
+	cpuCount?: number; // Number of CPUs
+	totalImages?: number; // Total number of images
+	operatingSystem?: string; // OS name
+	kernelVersion?: string; // Kernel version
+	architecture?: string; // System architecture
+	storageDriver?: string; // Docker storage driver
 	memory?: {
 		total: number; // Total memory in bytes
 		used: number; // Used memory in bytes
@@ -55,6 +61,12 @@ export type ServerStats = {
 		total: number; // Total storage in bytes
 		used: number; // Used storage in bytes
 		available: number; // Available storage in bytes
+	};
+	dockerStorage?: {
+		images: number; // Docker images storage in bytes
+		containers: number; // Docker containers storage in bytes
+		volumes: number; // Docker volumes storage in bytes
+		total: number; // Total Docker storage in bytes
 	};
 };
 
