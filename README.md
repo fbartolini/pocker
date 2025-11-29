@@ -2,6 +2,8 @@
 
 A consolidated dashboard for monitoring Docker containers across multiple servers. Connect to multiple Docker hosts, view all your containers in one place, and track versions across your infrastructure.
 
+![Alt text](screenshot.png?raw=true "screenshot")
+
 ## Features
 
 - **Multi-server support** – Connect to multiple Docker hosts (local sockets or remote proxies)

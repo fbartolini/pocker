@@ -230,6 +230,267 @@ const fetchContainersForSource = async (source: SourceConfig) => {
 	return docker.listContainers({ all: true });
 };
 
+const fetchSystemInfoForSource = async (source: SourceConfig) => {
+	try {
+		const docker = getDockerClient(source);
+		const info = await docker.info();
+		
+		// Log the raw Docker info response to understand the structure
+		// This helps us parse it correctly - enable with METADATA_DEBUG=true
+		const debug = process.env.METADATA_DEBUG === 'true';
+		if (debug) {
+			console.log(`[aggregator] Raw Docker info for ${source.name}:`, JSON.stringify({
+				MemoryTotal: info.MemoryTotal,
+				MemTotal: info.MemTotal,
+				MemAvailable: info.MemAvailable,
+				MemFree: info.MemFree,
+				Driver: info.Driver,
+				DriverStatus: info.DriverStatus,
+				ServerVersion: info.ServerVersion
+			}, null, 2));
+		}
+		
+		// Extract memory information
+		// Docker API returns:
+		// - MemoryTotal: Total memory in bytes (number) - Docker daemon's view
+		// - MemTotal: Total memory - appears to be in BYTES (not KB as /proc/meminfo would suggest)
+		// - MemAvailable: Available memory - appears to be in BYTES
+		// - MemFree: Free memory - appears to be in BYTES
+		// Note: Despite the name suggesting /proc/meminfo values (which are in KB),
+		// Docker's API actually returns these in bytes for consistency
+		let memoryTotal = 0;
+		let memoryUsed = 0;
+		let memoryAvailable = 0;
+		
+		// Priority 1: Use MemTotal (in bytes)
+		// Based on the logs, MemTotal values like 12884901888 represent 12GB, so they're already in bytes
+		if (info.MemTotal !== undefined && info.MemTotal !== null && typeof info.MemTotal === 'number' && info.MemTotal > 0) {
+			memoryTotal = info.MemTotal; // Already in bytes
+		}
+		// Priority 2: Fallback to MemoryTotal (bytes, Docker daemon's view)
+		else if (info.MemoryTotal !== undefined && info.MemoryTotal !== null) {
+			if (typeof info.MemoryTotal === 'number' && info.MemoryTotal > 0) {
+				memoryTotal = info.MemoryTotal; // Already in bytes
+			} else if (typeof info.MemoryTotal === 'string' && info.MemoryTotal.trim()) {
+				// Parse string format if Docker returns it as string
+				const match = info.MemoryTotal.match(/([\d.]+)\s*(TiB|GiB|MiB|KiB|B|TB|GB|MB|KB)?/i);
+				if (match) {
+					const value = parseFloat(match[1]);
+					const unit = (match[2] || '').toLowerCase();
+					if (unit.includes('tib') || unit.includes('tb')) {
+						memoryTotal = value * 1024 * 1024 * 1024 * 1024;
+					} else if (unit.includes('gib') || unit.includes('gb')) {
+						memoryTotal = value * 1024 * 1024 * 1024;
+					} else if (unit.includes('mib') || unit.includes('mb')) {
+						memoryTotal = value * 1024 * 1024;
+					} else if (unit.includes('kib') || unit.includes('kb')) {
+						memoryTotal = value * 1024;
+					} else {
+						// No unit - assume bytes
+						memoryTotal = value;
+					}
+				}
+			}
+		}
+		
+		// Calculate used/available memory
+		// Docker API returns these in bytes (not KB)
+		if (memoryTotal > 0) {
+			// MemAvailable is preferred (more accurate, includes cache/buffers that can be freed)
+			if (info.MemAvailable !== undefined && info.MemAvailable !== null && typeof info.MemAvailable === 'number' && info.MemAvailable > 0) {
+				memoryAvailable = info.MemAvailable; // Already in bytes
+				memoryUsed = memoryTotal - memoryAvailable;
+			}
+			// Fallback to MemFree (less accurate, doesn't account for cache)
+			else if (info.MemFree !== undefined && info.MemFree !== null && typeof info.MemFree === 'number' && info.MemFree > 0) {
+				memoryAvailable = info.MemFree; // Already in bytes
+				memoryUsed = memoryTotal - memoryAvailable;
+			}
+			// If neither is available, we'll calculate from container stats (done later)
+		}
+		
+		if (debug && memoryTotal > 0) {
+			console.log(`[aggregator] Memory parsed for ${source.name}:`, {
+				total: `${(memoryTotal / 1024 / 1024 / 1024).toFixed(2)} GB`,
+				used: memoryUsed > 0 ? `${(memoryUsed / 1024 / 1024 / 1024).toFixed(2)} GB` : 'unknown',
+				available: memoryAvailable > 0 ? `${(memoryAvailable / 1024 / 1024 / 1024).toFixed(2)} GB` : 'unknown'
+			});
+		}
+		
+		// Extract storage information
+		// Priority 1: Use /system/df endpoint (requires SYSTEM=1 in socket proxy)
+		// This is much faster and more accurate than parsing DriverStatus
+		let storageTotal = 0;
+		let storageUsed = 0;
+		let storageAvailable = 0;
+		
+		try {
+			// Try to get storage info from /system/df endpoint
+			// This endpoint requires SYSTEM=1 in docker-socket-proxy
+			const dfResponse = await new Promise<any>((resolve, reject) => {
+				docker.modem.dial(
+					{
+						path: '/system/df',
+						method: 'GET',
+						statusCodes: {
+							200: true,
+							400: true,
+							500: true
+						}
+					},
+					(err: Error | null, data: any) => {
+						if (err) reject(err);
+						else resolve(data);
+					}
+				);
+			});
+			
+			if (dfResponse && typeof dfResponse === 'object') {
+				// Sum up all Docker storage usage
+				// dfResponse contains: Images, Containers, Volumes, BuildCache
+				// Each has: Size (total) and Reclaimable (can be freed)
+				let totalDockerStorage = 0;
+				
+				if (dfResponse.Images && Array.isArray(dfResponse.Images)) {
+					dfResponse.Images.forEach((img: any) => {
+						if (img.Size) totalDockerStorage += img.Size;
+					});
+				}
+				if (dfResponse.Containers && Array.isArray(dfResponse.Containers)) {
+					dfResponse.Containers.forEach((cnt: any) => {
+						if (cnt.SizeRootFs) totalDockerStorage += cnt.SizeRootFs;
+					});
+				}
+				if (dfResponse.Volumes && Array.isArray(dfResponse.Volumes)) {
+					dfResponse.Volumes.forEach((vol: any) => {
+						if (vol.UsageData && vol.UsageData.Size) {
+							totalDockerStorage += vol.UsageData.Size;
+						}
+					});
+				}
+				if (dfResponse.BuildCache && Array.isArray(dfResponse.BuildCache)) {
+					dfResponse.BuildCache.forEach((cache: any) => {
+						if (cache.Size) totalDockerStorage += cache.Size;
+					});
+				}
+				
+				if (totalDockerStorage > 0) {
+					storageUsed = totalDockerStorage;
+					// Note: /system/df doesn't provide total disk space, only Docker usage
+					// We'll use this as used storage, but won't have total/available
+					if (debug) {
+						console.log(`[aggregator] Storage from /system/df for ${source.name}:`, {
+							used: `${(storageUsed / 1024 / 1024 / 1024).toFixed(2)} GB`,
+							note: 'Total disk space not available from /system/df'
+						});
+					}
+				}
+			}
+		} catch (error) {
+			// /system/df endpoint not available (SYSTEM=1 not enabled or not supported)
+			// Fall back to parsing DriverStatus
+			if (debug) {
+				console.log(`[aggregator] /system/df not available for ${source.name}, falling back to DriverStatus`);
+			}
+			
+			// Helper function to parse size strings from DriverStatus
+			const parseSize = (sizeStr: string): number => {
+				if (!sizeStr || typeof sizeStr !== 'string') return 0;
+				const match = sizeStr.match(/([\d.]+)\s*(TB|GB|MB|KB|B|TiB|GiB|MiB|KiB)?/i);
+				if (match) {
+					const num = parseFloat(match[1]);
+					if (isNaN(num)) return 0;
+					const unit = (match[2] || '').toLowerCase();
+					// Convert to bytes based on unit
+					if (unit.includes('tb') || unit.includes('tib')) {
+						return num * 1024 * 1024 * 1024 * 1024;
+					} else if (unit.includes('gb') || unit.includes('gib')) {
+						return num * 1024 * 1024 * 1024;
+					} else if (unit.includes('mb') || unit.includes('mib')) {
+						return num * 1024 * 1024;
+					} else if (unit.includes('kb') || unit.includes('kib')) {
+						return num * 1024;
+					}
+					// No unit specified - assume bytes
+					return num;
+				}
+				return 0;
+			};
+			
+			// Check DriverStatus array for storage information
+			if (info.DriverStatus && Array.isArray(info.DriverStatus)) {
+				for (const status of info.DriverStatus) {
+					if (Array.isArray(status) && status.length >= 2) {
+						const key = String(status[0]).toLowerCase();
+						const value = String(status[1]);
+						
+						// Look for storage-related fields (Data Space Used, Data Space Total, etc.)
+						if (key.includes('data space')) {
+							// Format can be "123.45 GB / 500 GB" or separate "Data Space Used" and "Data Space Total"
+							if (value.includes('/')) {
+								// Combined format: "used / total"
+								const parts = value.split('/').map(s => s.trim());
+								if (parts.length === 2) {
+									const used = parseSize(parts[0]);
+									const total = parseSize(parts[1]);
+									if (total > 0) {
+										storageUsed = used;
+										storageTotal = total;
+										storageAvailable = total - used;
+									}
+								}
+							} else if (key.includes('used')) {
+								storageUsed = parseSize(value);
+							} else if (key.includes('total')) {
+								storageTotal = parseSize(value);
+							}
+						}
+					}
+				}
+				
+				// Calculate missing values if we have partial info
+				if (storageTotal > 0 && storageUsed > 0 && storageAvailable === 0) {
+					storageAvailable = storageTotal - storageUsed;
+				} else if (storageTotal > 0 && storageAvailable > 0 && storageUsed === 0) {
+					storageUsed = storageTotal - storageAvailable;
+				}
+			}
+			
+			// Try PoolBlocksize for devicemapper (if overlay2 didn't work)
+			if (storageTotal === 0 && info.Driver === 'devicemapper') {
+				if (info.PoolBlocksize && info.PoolBlocksUsed && info.PoolBlocksTotal) {
+					const blockSize = Number(info.PoolBlocksize) || 0;
+					const blocksUsed = Number(info.PoolBlocksUsed) || 0;
+					const blocksTotal = Number(info.PoolBlocksTotal) || 0;
+					
+					if (blockSize > 0 && blocksTotal > 0) {
+						storageTotal = blockSize * blocksTotal;
+						storageUsed = blockSize * blocksUsed;
+						storageAvailable = storageTotal - storageUsed;
+					}
+				}
+			}
+		}
+		
+		return {
+			memory: memoryTotal > 0 ? {
+				total: memoryTotal,
+				used: memoryUsed,
+				available: memoryAvailable
+			} : undefined,
+			storage: storageTotal > 0 ? {
+				total: storageTotal,
+				used: storageUsed,
+				available: storageAvailable
+			} : undefined,
+			dockerVersion: info.ServerVersion || undefined
+		};
+	} catch (error) {
+		console.warn(`[aggregator] Unable to fetch system info for ${source.name}:`, error);
+		return { memory: undefined, storage: undefined, dockerVersion: undefined };
+	}
+};
+
 
 export const getAggregatedApps = async (): Promise<AppsResponse> => {
 	const warnings: AppsResponse['warnings'] = [];
@@ -249,6 +510,23 @@ export const getAggregatedApps = async (): Promise<AppsResponse> => {
 			}
 		})
 	);
+
+	// Fetch system info for each source in parallel
+	const systemInfoMatrix = await Promise.all(
+		settings.dockerSources.map(async (source) => {
+			const systemInfo = await fetchSystemInfoForSource(source);
+			return { source, systemInfo };
+		})
+	);
+	
+	// Create a map for quick lookup
+	const systemInfoMap = new Map<string, typeof systemInfoMatrix[0]['systemInfo']>();
+	systemInfoMatrix.forEach(({ source, systemInfo }) => {
+		systemInfoMap.set(source.name, systemInfo);
+	});
+	
+	// Note: Container memory stats calculation is now done asynchronously via /api/stats
+	// This keeps the main endpoint fast - we only return what's available from docker.info()
 
 	const workingApps = new Map<string, WorkingApp>();
 
@@ -309,12 +587,74 @@ export const getAggregatedApps = async (): Promise<AppsResponse> => {
 	const uniqueServers = new Set<string>();
 	appList.forEach((app) => app.containers.forEach((inst) => uniqueServers.add(inst.sourceLabel)));
 
+	// Calculate server statistics
+	const serverStatsMap = new Map<string, {
+		sourceId: string;
+		sourceLabel: string;
+		color?: string;
+		total: number;
+		running: number;
+		stopped: number;
+		crashed: number;
+		outdated: number;
+	}>();
+
+	let totalContainers = 0;
+
+	for (const app of appList) {
+		for (const container of app.containers) {
+			totalContainers++;
+			
+			const systemInfo = systemInfoMap.get(container.sourceId);
+			const existing = serverStatsMap.get(container.sourceLabel) ?? {
+				sourceId: container.sourceId,
+				sourceLabel: container.sourceLabel,
+				color: container.color,
+				total: 0,
+				running: 0,
+				stopped: 0,
+				crashed: 0,
+				outdated: 0,
+				dockerVersion: systemInfo?.dockerVersion,
+				memory: systemInfo?.memory,
+				storage: systemInfo?.storage
+			};
+
+			existing.total++;
+			
+			if (container.state === 'running') {
+				existing.running++;
+			} else {
+				existing.stopped++;
+				if (container.exitCode !== null && container.exitCode !== 0) {
+					existing.crashed++;
+				}
+			}
+
+			// Check if outdated
+			if (app.latestVersion && container.version) {
+				if (compareVersions(container.version, app.latestVersion) < 0) {
+					existing.outdated++;
+				}
+			}
+
+			serverStatsMap.set(container.sourceLabel, existing);
+		}
+	}
+
+	const serverStats = Array.from(serverStatsMap.values()).sort((a, b) => 
+		a.sourceLabel.localeCompare(b.sourceLabel)
+	);
+
 	return {
 		generatedAt: new Date().toISOString(),
 		apps: appList,
 		appFilters: Array.from(new Set(appList.map((app) => app.displayName))).sort(),
 		serverFilters: Array.from(uniqueServers).sort(),
-		warnings
+		warnings,
+		showComposeTags: settings.showComposeTags,
+		serverStats,
+		totalContainers
 	};
 };
 

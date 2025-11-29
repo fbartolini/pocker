@@ -1,7 +1,23 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import { onMount } from 'svelte';
 	import type { AggregatedApp, AppsResponse } from '$lib/types';
 	import { compareVersions, formatVersionLabel } from '$lib/utils/version';
+
+	// Format bytes to human-readable format
+	const formatBytes = (bytes: number): string => {
+		if (bytes === 0) return '0 B';
+		const k = 1024;
+		const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+		const i = Math.floor(Math.log(bytes) / Math.log(k));
+		return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+	};
+
+	// Format percentage
+	const formatPercent = (used: number, total: number): string => {
+		if (total === 0) return '0%';
+		return `${((used / total) * 100).toFixed(1)}%`;
+	};
 
 	export let data: { initialData: AppsResponse; embed: boolean; maxWidth: string | null };
 
@@ -9,6 +25,7 @@
 	let filteredApps: AggregatedApp[] = snapshot.apps;
 	let selectedApp = 'all';
 	let selectedServer = 'all';
+	let showIssuesOnly = false;
 	let isRefreshing = false;
 	let errorMessage = '';
 	let embedMode = data.embed;
@@ -16,6 +33,7 @@
 	let showComposeTags = snapshot.showComposeTags ?? false;
 	let hoverTimeout: ReturnType<typeof setTimeout> | null = null;
 	let hoveredAppId: string | null = null;
+	let statsFetched = false; // Track if we've fetched stats to avoid duplicate calls
 
 	$: embedMode = data.embed;
 	$: pageMaxWidth = data.maxWidth;
@@ -23,6 +41,47 @@
 	$: if (browser) {
 		document.body.dataset.embed = embedMode ? 'true' : 'false';
 	}
+	
+	// Fetch memory stats asynchronously after initial load (only once)
+	onMount(() => {
+		if (snapshot.serverStats && snapshot.serverStats.length > 0 && !statsFetched) {
+			fetchMemoryStats();
+		}
+	});
+
+	const fetchMemoryStats = async () => {
+		if (statsFetched) return; // Don't fetch multiple times
+		statsFetched = true;
+		
+		try {
+			const response = await fetch('/api/stats');
+			if (!response.ok) {
+				return; // Silently fail - stats are optional
+			}
+			const data = await response.json();
+			const memoryStats = data.memoryStats || {};
+			
+			// Update serverStats with memory usage from container stats
+			if (snapshot.serverStats) {
+				snapshot.serverStats = snapshot.serverStats.map((stats) => {
+					const sourceStats = memoryStats[stats.sourceId];
+					if (sourceStats && stats.memory) {
+						return {
+							...stats,
+							memory: {
+								...stats.memory,
+								used: sourceStats.used,
+								available: sourceStats.available
+							}
+						};
+					}
+					return stats;
+				});
+			}
+		} catch (error) {
+			// Silently fail - stats are optional
+		}
+	};
 
 	const handleTitleHover = (appId: string, description: string | null) => {
 		if (!description) return;
@@ -54,12 +113,16 @@
 	const fetchApps = async () => {
 		isRefreshing = true;
 		errorMessage = '';
+		statsFetched = false; // Reset flag on refresh
 		try {
 			const response = await fetch('/api/apps');
 			if (!response.ok) {
 				throw new Error('Failed to refresh data');
 			}
 			snapshot = await response.json();
+			
+			// Fetch memory stats asynchronously (this can be slow)
+			fetchMemoryStats();
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unknown error';
 		} finally {
@@ -72,12 +135,28 @@
 		return instance.uiUrl ?? instance.ports.find((port) => port.url)?.url ?? null;
 	};
 
+	// Check if an app has issues (outdated versions or crashed containers)
+	const hasIssues = (app: AggregatedApp): boolean => {
+		return app.containers.some((container) => {
+			// Check for crashed containers
+			if (container.state !== 'running' && container.exitCode !== null && container.exitCode !== 0) {
+				return true;
+			}
+			// Check for outdated versions
+			if (app.latestVersion && container.version) {
+				return compareVersions(container.version, app.latestVersion) < 0;
+			}
+			return false;
+		});
+	};
+
 	$: filteredApps = snapshot.apps.filter((app) => {
 		const matchesApp = selectedApp === 'all' || app.displayName === selectedApp;
 		const matchesServer =
 			selectedServer === 'all' ||
 			app.containers.some((instance) => instance.sourceLabel === selectedServer);
-		return matchesApp && matchesServer;
+		const matchesIssues = !showIssuesOnly || hasIssues(app);
+		return matchesApp && matchesServer && matchesIssues;
 	});
 </script>
 
@@ -87,7 +166,7 @@
 	style:max-width={pageMaxWidth ?? 'none'}
 	style:margin={pageMaxWidth ? '0 auto' : '0'}
 >
-	{#if !embedMode}
+		{#if !embedMode}
 		<header class="toolbar">
 			<div class="filters">
 				<label>
@@ -108,8 +187,15 @@
 						{/each}
 					</select>
 				</label>
+				<label class="checkbox-label">
+					<input type="checkbox" bind:checked={showIssuesOnly} />
+					<span>Show only issues</span>
+				</label>
 			</div>
 			<div class="actions">
+				<div class="stats-summary">
+					<strong>{snapshot.totalContainers ?? 0}</strong> container{snapshot.totalContainers !== 1 ? 's' : ''}
+				</div>
 				<button class="refresh" on:click={fetchApps} disabled={isRefreshing}>
 					{#if isRefreshing}
 						Refreshing…
@@ -120,7 +206,7 @@
 				<small>Updated {new Date(snapshot.generatedAt).toLocaleString()}</small>
 			</div>
 		</header>
-	{/if}
+		{/if}
 
 	{#if errorMessage}
 		<p class="error">{errorMessage}</p>
@@ -213,6 +299,88 @@
 			{/each}
 		{/if}
 	</section>
+
+	{#if !embedMode && snapshot.serverStats && snapshot.serverStats.length > 0}
+		<section class="server-stats">
+			<h3>Server Statistics</h3>
+			<div class="stats-grid">
+				{#each snapshot.serverStats as stats}
+					<div class="stat-card">
+						<div class="stat-header">
+							<span class="stat-server" style:border-color={stats.color ?? 'rgba(79, 128, 255, 0.25)'}>{stats.sourceLabel}</span>
+							{#if stats.dockerVersion}
+								<span class="stat-version">Docker {stats.dockerVersion}</span>
+							{/if}
+						</div>
+						<div class="stat-body">
+							<div class="stat-row">
+								<span class="stat-label">Total:</span>
+								<span class="stat-value">{stats.total}</span>
+							</div>
+							<div class="stat-row">
+								<span class="stat-label">Running:</span>
+								<span class="stat-value success">{stats.running}</span>
+							</div>
+							<div class="stat-row">
+								<span class="stat-label">Stopped:</span>
+								<span class="stat-value">{stats.stopped}</span>
+							</div>
+							{#if stats.crashed > 0}
+								<div class="stat-row">
+									<span class="stat-label">Crashed:</span>
+									<span class="stat-value crashed-count">{stats.crashed}</span>
+								</div>
+							{/if}
+							{#if stats.outdated > 0}
+								<div class="stat-row">
+									<span class="stat-label">Outdated:</span>
+									<span class="stat-value warning">{stats.outdated}</span>
+								</div>
+							{/if}
+						</div>
+						{#if stats.memory || stats.storage}
+							<div class="stat-resources">
+								{#if stats.memory}
+									<div class="resource-item">
+										<div class="resource-header">
+											<span class="resource-label">Memory</span>
+											<span class="resource-percent">{formatPercent(stats.memory.used, stats.memory.total)}</span>
+										</div>
+										<div class="resource-bar">
+											<div 
+												class="resource-bar-fill memory"
+												style="width: {(stats.memory.used / stats.memory.total) * 100}%"
+											></div>
+										</div>
+										<div class="resource-details">
+											<span>{formatBytes(stats.memory.used)}</span> / <span>{formatBytes(stats.memory.total)}</span>
+										</div>
+									</div>
+								{/if}
+								{#if stats.storage}
+									<div class="resource-item">
+										<div class="resource-header">
+											<span class="resource-label">Storage</span>
+											<span class="resource-percent">{formatPercent(stats.storage.used, stats.storage.total)}</span>
+										</div>
+										<div class="resource-bar">
+											<div 
+												class="resource-bar-fill storage"
+												style="width: {(stats.storage.used / stats.storage.total) * 100}%"
+											></div>
+										</div>
+										<div class="resource-details">
+											<span>{formatBytes(stats.storage.used)}</span> / <span>{formatBytes(stats.storage.total)}</span>
+										</div>
+									</div>
+								{/if}
+							</div>
+						{/if}
+					</div>
+				{/each}
+			</div>
+		</section>
+	{/if}
 </div>
 
 <style>
@@ -526,5 +694,182 @@
 	.empty {
 		color: #8ea1d8;
 		font-size: 0.95rem;
+	}
+
+	.checkbox-label {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		cursor: pointer;
+		user-select: none;
+	}
+
+	.checkbox-label input[type="checkbox"] {
+		cursor: pointer;
+		width: 1.1rem;
+		height: 1.1rem;
+		accent-color: #4f80ff;
+	}
+
+	.stats-summary {
+		font-size: 0.9rem;
+		color: #c8d2fb;
+		margin-right: 0.5rem;
+	}
+
+	.stats-summary strong {
+		color: #e1e7ff;
+		font-weight: 600;
+	}
+
+	.server-stats {
+		margin-top: 2rem;
+		padding-top: 1.5rem;
+		border-top: 1px solid rgba(79, 128, 255, 0.15);
+	}
+
+	.server-stats h3 {
+		margin: 0 0 1rem 0;
+		font-size: 1.1rem;
+		color: #e1e7ff;
+		font-weight: 600;
+	}
+
+	.stats-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+		gap: 1rem;
+	}
+
+	.stat-card {
+		background: rgba(16, 25, 46, 0.85);
+		border: 1px solid rgba(79, 128, 255, 0.15);
+		border-radius: 0.75rem;
+		padding: 1rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.stat-header {
+		border-bottom: 1px solid rgba(79, 128, 255, 0.1);
+		padding-bottom: 0.5rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+
+	.stat-server {
+		display: inline-block;
+		padding: 0.25rem 0.6rem;
+		border-radius: 999px;
+		font-size: 0.75rem;
+		font-weight: 600;
+		background: rgba(79, 128, 255, 0.12);
+		border: 1px solid rgba(79, 128, 255, 0.25);
+		color: #c8d2fb;
+	}
+
+	.stat-body {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.stat-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		font-size: 0.85rem;
+	}
+
+	.stat-label {
+		color: #7f8bad;
+	}
+
+	.stat-value {
+		color: #e1e7ff;
+		font-weight: 600;
+	}
+
+	.stat-value.success {
+		color: #51cf66;
+	}
+
+	.stat-value.crashed-count {
+		color: #ff4757;
+	}
+
+	.stat-value.warning {
+		color: #ffd43b;
+	}
+
+	.stat-version {
+		font-size: 0.7rem;
+		color: #7f8bad;
+		margin-top: 0.25rem;
+		display: block;
+	}
+
+	.stat-resources {
+		margin-top: 0.75rem;
+		padding-top: 0.75rem;
+		border-top: 1px solid rgba(79, 128, 255, 0.1);
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.resource-item {
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+	}
+
+	.resource-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		font-size: 0.8rem;
+	}
+
+	.resource-label {
+		color: #7f8bad;
+		font-weight: 500;
+	}
+
+	.resource-percent {
+		color: #c8d2fb;
+		font-weight: 600;
+		font-size: 0.75rem;
+	}
+
+	.resource-bar {
+		width: 100%;
+		height: 0.5rem;
+		background: rgba(79, 128, 255, 0.1);
+		border-radius: 999px;
+		overflow: hidden;
+	}
+
+	.resource-bar-fill {
+		height: 100%;
+		border-radius: 999px;
+		transition: width 0.3s ease;
+	}
+
+	.resource-bar-fill.memory {
+		background: linear-gradient(90deg, #51cf66 0%, #ffd43b 70%, #ff4757 100%);
+	}
+
+	.resource-bar-fill.storage {
+		background: linear-gradient(90deg, #4f80ff 0%, #ffd43b 70%, #ff4757 100%);
+	}
+
+	.resource-details {
+		font-size: 0.75rem;
+		color: #7f8bad;
+		display: flex;
+		gap: 0.25rem;
 	}
 </style>

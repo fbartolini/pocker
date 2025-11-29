@@ -36,6 +36,28 @@ export type AggregatedApp = {
 	containers: ServerInstance[];
 };
 
+export type ServerStats = {
+	sourceId: string;
+	sourceLabel: string;
+	color?: string; // Server color for UI display
+	total: number;
+	running: number;
+	stopped: number;
+	crashed: number;
+	outdated: number;
+	dockerVersion?: string;
+	memory?: {
+		total: number; // Total memory in bytes
+		used: number; // Used memory in bytes
+		available: number; // Available memory in bytes
+	};
+	storage?: {
+		total: number; // Total storage in bytes
+		used: number; // Used storage in bytes
+		available: number; // Available storage in bytes
+	};
+};
+
 export type AppsResponse = {
 	generatedAt: string;
 	apps: AggregatedApp[];
@@ -43,5 +65,7 @@ export type AppsResponse = {
 	serverFilters: string[];
 	warnings: SourceWarning[];
 	showComposeTags?: boolean;
+	serverStats?: ServerStats[];
+	totalContainers?: number;
 };
 
