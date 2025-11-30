@@ -8,6 +8,7 @@
 	import ContainerStatsTooltip from '$lib/components/ContainerStatsTooltip.svelte';
 	import ServerStatsTooltip from '$lib/components/ServerStatsTooltip.svelte';
 	import ResourceBar from '$lib/components/ResourceBar.svelte';
+	import MemoryPieChart from '$lib/components/MemoryPieChart.svelte';
 
 	export let data: { initialData: AppsResponse; embed: boolean; maxWidth: string | null };
 
@@ -30,7 +31,7 @@
 	let containerStatsTimeout: ReturnType<typeof setTimeout> | null = null;
 	let hideTooltipTimeout: ReturnType<typeof setTimeout> | null = null;
 	let hoveredServer: { sourceLabel: string; element: HTMLElement | null } | null = null; // Track which server is being hovered
-	let serverDetails: Record<string, { topContainers: Array<{ name: string; memory: number }>; memoryTotal: number }> = {};
+	let serverDetails: Record<string, { topContainers: Array<{ name: string; memory: number }>; allContainers?: Array<{ name: string; memory: number }>; memoryTotal: number }> = {};
 
 	$: embedMode = data.embed;
 	$: pageMaxWidth = data.maxWidth;
@@ -43,6 +44,7 @@
 	onMount(() => {
 		if (snapshot.serverStats && snapshot.serverStats.length > 0 && !statsFetched) {
 			fetchMemoryStats();
+			fetchAllServerDetails();
 		}
 		if (snapshot.apps && snapshot.apps.length > 0 && !versionsFetched) {
 			fetchVersions();
@@ -235,11 +237,35 @@
 		hoveredContainer = null;
 	};
 
+	const fetchAllServerDetails = async () => {
+		if (!snapshot.serverStats) return;
+		
+		// Fetch details for all servers in parallel
+		const promises = snapshot.serverStats.map(async (serverStat) => {
+			if (serverDetails[serverStat.sourceId]) {
+				return; // Already fetched
+			}
+			
+			try {
+				const response = await fetch(`/api/server/${serverStat.sourceId}/details`);
+				if (response.ok) {
+					const details = await response.json();
+					serverDetails[serverStat.sourceId] = details;
+				}
+			} catch (error) {
+				// Silently fail
+			}
+		});
+		
+		await Promise.all(promises);
+		serverDetails = { ...serverDetails }; // Trigger reactivity
+	};
+
 	const handleServerHover = async (sourceLabel: string, event: MouseEvent) => {
 		const targetElement = (event.currentTarget as HTMLElement);
 		hoveredServer = { sourceLabel, element: targetElement };
 		
-		// Find the sourceId for this server
+		// Details should already be fetched, but fetch if missing
 		const serverStat = snapshot.serverStats?.find(s => s.sourceLabel === sourceLabel);
 		if (serverStat && !serverDetails[serverStat.sourceId]) {
 			// Fetch detailed server info
@@ -264,6 +290,7 @@
 		isRefreshing = true;
 		errorMessage = '';
 		statsFetched = false; // Reset flag on refresh
+		serverDetails = {}; // Clear server details on refresh
 		try {
 			const response = await fetch('/api/apps');
 			if (!response.ok) {
@@ -271,8 +298,11 @@
 			}
 			snapshot = await response.json();
 			
-			// Fetch memory stats asynchronously (this can be slow)
-			fetchMemoryStats();
+			// Fetch memory stats and server details asynchronously (this can be slow)
+			if (snapshot.serverStats && snapshot.serverStats.length > 0) {
+				fetchMemoryStats();
+				fetchAllServerDetails();
+			}
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Unknown error';
 		} finally {
@@ -534,6 +564,13 @@
 									<ResourceBar label="Storage" used={stats.storage.used} total={stats.storage.total} type="storage" />
 								{/if}
 							</div>
+						{/if}
+						{#if stats.memory && serverDetails[stats.sourceId]}
+							{@const details = serverDetails[stats.sourceId]}
+							{@const memoryTotal = stats.memory.total || details.memoryTotal || 0}
+							{#if details.allContainers && details.allContainers.length > 0 && memoryTotal > 0}
+								<MemoryPieChart containers={details.allContainers} memoryTotal={memoryTotal} />
+							{/if}
 						{/if}
 					</div>
 				{/each}

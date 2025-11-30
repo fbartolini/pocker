@@ -18,8 +18,8 @@ export const GET: RequestHandler = async ({ params }) => {
 		const containers = await docker.listContainers({ all: true });
 		const runningContainers = containers.filter((c) => c.State === 'running');
 		
-		// Get container memory usage for top containers
-		const containerMemoryPromises = runningContainers.slice(0, 10).map(async (container) => {
+		// Get container memory usage for all running containers
+		const containerMemoryPromises = runningContainers.map(async (container) => {
 			try {
 				const containerObj = docker.getContainer(container.Id);
 				const statsPromise = containerObj.stats({ stream: false });
@@ -53,10 +53,12 @@ export const GET: RequestHandler = async ({ params }) => {
 			}
 		});
 		
-		const containerMemories = (await Promise.all(containerMemoryPromises))
+		const allContainerMemories = (await Promise.all(containerMemoryPromises))
 			.filter((c): c is { name: string; memory: number } => c !== null && c.memory > 0)
-			.sort((a, b) => b.memory - a.memory)
-			.slice(0, 5); // Top 5 by memory
+			.sort((a, b) => b.memory - a.memory);
+		
+		// Top 5 for tooltip display
+		const topContainers = allContainerMemories.slice(0, 5);
 		
 		// Get system info
 		const info = await docker.info();
@@ -68,7 +70,8 @@ export const GET: RequestHandler = async ({ params }) => {
 					: 0) || 0;
 		
 		return json({
-			topContainers: containerMemories,
+			topContainers,
+			allContainers: allContainerMemories, // All containers for pie chart
 			memoryTotal,
 			totalContainers: containers.length,
 			runningContainers: runningContainers.length
