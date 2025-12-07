@@ -199,7 +199,9 @@ const fetchDockerHubMetadata = async (ref: ImageReference): Promise<HubMetadata 
 	}
 
 	try {
-		const response = await fetch(`https://hub.docker.com${slug}`);
+		const response = await fetch(`https://hub.docker.com${slug}`, {
+			signal: AbortSignal.timeout(settings.dockerHubTimeoutMs)
+		});
 		if (response.status === 404) {
 			return null;
 		}
@@ -222,7 +224,17 @@ const fetchDockerHubMetadata = async (ref: ImageReference): Promise<HubMetadata 
 		hubCache.set(slug, { value: result, expires: Date.now() + ttl });
 		return result;
 	} catch (error) {
-		console.warn(`[metadata] Failed to fetch Docker Hub metadata for ${slug}:`, error);
+		const isTimeout = error instanceof Error && (
+			error.name === 'TimeoutError' || 
+			error.name === 'AbortError' ||
+			error.message.includes('timeout') ||
+			error.message.includes('TIMEOUT')
+		);
+		if (isTimeout) {
+			logDebug(`Docker Hub metadata fetch timeout for ${slug} (${settings.dockerHubTimeoutMs}ms)`);
+		} else {
+			console.warn(`[metadata] Failed to fetch Docker Hub metadata for ${slug}:`, error);
+		}
 		return null;
 	}
 };
@@ -241,7 +253,9 @@ const fetchRepositoryMetadata = async (ref: ImageReference): Promise<HubMetadata
 	}
 
 	try {
-		const response = await fetch(`https://hub.docker.com/v2/repositories/${namespace}/${repo}/`);
+		const response = await fetch(`https://hub.docker.com/v2/repositories/${namespace}/${repo}/`, {
+			signal: AbortSignal.timeout(settings.dockerHubTimeoutMs)
+		});
 		if (response.status === 404) {
 			logDebug('repository 404', cacheKey);
 			return null;
@@ -268,7 +282,17 @@ const fetchRepositoryMetadata = async (ref: ImageReference): Promise<HubMetadata
 		logDebug('repository data', cacheKey, result);
 		return result;
 	} catch (error) {
-		console.warn(`[metadata] Docker Hub repository lookup failed for ${cacheKey}:`, error);
+		const isTimeout = error instanceof Error && (
+			error.name === 'TimeoutError' || 
+			error.name === 'AbortError' ||
+			error.message.includes('timeout') ||
+			error.message.includes('TIMEOUT')
+		);
+		if (isTimeout) {
+			logDebug(`Docker Hub repository lookup timeout for ${cacheKey} (${settings.dockerHubTimeoutMs}ms)`);
+		} else {
+			console.warn(`[metadata] Docker Hub repository lookup failed for ${cacheKey}:`, error);
+		}
 		return null;
 	}
 };
@@ -338,7 +362,10 @@ const resolveVersionFromDigestDockerHub = async (
 		
 		while (page <= 5) { // Limit to 5 pages to avoid infinite loops
 			const response = await fetch(
-				`https://hub.docker.com/v2/repositories/${namespace}/${repo}/tags?page=${page}&page_size=100`
+				`https://hub.docker.com/v2/repositories/${namespace}/${repo}/tags?page=${page}&page_size=100`,
+				{
+					signal: AbortSignal.timeout(settings.dockerHubTimeoutMs)
+				}
 			);
 			
 			if (response.status === 404) {
@@ -434,7 +461,17 @@ const resolveVersionFromDigestDockerHub = async (
 		
 		return foundTag;
 	} catch (error) {
-		console.warn(`[metadata] Failed to resolve version from digest for ${namespace}/${repo}:${digest}:`, error);
+		const isTimeout = error instanceof Error && (
+			error.name === 'TimeoutError' || 
+			error.name === 'AbortError' ||
+			error.message.includes('timeout') ||
+			error.message.includes('TIMEOUT')
+		);
+		if (isTimeout) {
+			logDebug(`Docker Hub version resolution timeout for ${namespace}/${repo}:${digest} (${settings.dockerHubTimeoutMs}ms)`);
+		} else {
+			console.warn(`[metadata] Failed to resolve version from digest for ${namespace}/${repo}:${digest}:`, error);
+		}
 		return null;
 	}
 };
@@ -464,7 +501,10 @@ const resolveVersionFromDigestGHCR = async (
 		let bearerToken: string | null = null;
 		try {
 			const tokenResponse = await fetch(
-				`https://ghcr.io/token?service=ghcr.io&scope=repository:${owner}/${imageName}:pull`
+				`https://ghcr.io/token?service=ghcr.io&scope=repository:${owner}/${imageName}:pull`,
+				{
+					signal: AbortSignal.timeout(settings.dockerHubTimeoutMs)
+				}
 			);
 			if (tokenResponse.ok) {
 				const tokenData = (await tokenResponse.json()) as { token?: string };
@@ -484,7 +524,10 @@ const resolveVersionFromDigestGHCR = async (
 
 		const tagsResponse = await fetch(
 			`https://ghcr.io/v2/${owner}/${imageName}/tags/list`,
-			{ headers }
+			{ 
+				headers,
+				signal: AbortSignal.timeout(settings.dockerHubTimeoutMs)
+			}
 		);
 
 		if (tagsResponse.status === 404) {
@@ -534,7 +577,10 @@ const resolveVersionFromDigestGHCR = async (
 
 					const manifestResponse = await fetch(
 						`https://ghcr.io/v2/${owner}/${imageName}/manifests/${tag}`,
-						{ headers: manifestHeaders }
+						{ 
+							headers: manifestHeaders,
+							signal: AbortSignal.timeout(settings.dockerHubTimeoutMs)
+						}
 					);
 
 					if (!manifestResponse.ok) {
@@ -641,7 +687,17 @@ const resolveVersionFromDigestGHCR = async (
 		
 		return foundTag;
 	} catch (error) {
-		console.warn(`[metadata] Failed to resolve version from digest for ghcr.io/${owner}/${imageName}:${digest}:`, error);
+		const isTimeout = error instanceof Error && (
+			error.name === 'TimeoutError' || 
+			error.name === 'AbortError' ||
+			error.message.includes('timeout') ||
+			error.message.includes('TIMEOUT')
+		);
+		if (isTimeout) {
+			logDebug(`GHCR version resolution timeout for ${owner}/${imageName}:${digest} (${settings.dockerHubTimeoutMs}ms)`);
+		} else {
+			console.warn(`[metadata] Failed to resolve version from digest for ghcr.io/${owner}/${imageName}:${digest}:`, error);
+		}
 		return null;
 	}
 };
@@ -667,7 +723,9 @@ const fetchProductMetadata = async (ref: ImageReference): Promise<HubMetadata | 
 			query: slugCandidates[0] ?? ref.repository,
 			type: 'image'
 		});
-		const response = await fetch(`https://hub.docker.com/api/content/v1/products/search?${params}`);
+		const response = await fetch(`https://hub.docker.com/api/content/v1/products/search?${params}`, {
+			signal: AbortSignal.timeout(settings.dockerHubTimeoutMs)
+		});
 		if (!response.ok) {
 			throw new Error(`Docker Hub products search responded with ${response.status}`);
 		}
@@ -700,7 +758,17 @@ const fetchProductMetadata = async (ref: ImageReference): Promise<HubMetadata | 
 		logDebug('product metadata', cacheKey, result);
 		return result;
 	} catch (error) {
-		console.warn(`[metadata] Docker Hub product lookup failed for ${ref.repository}:`, error);
+		const isTimeout = error instanceof Error && (
+			error.name === 'TimeoutError' || 
+			error.name === 'AbortError' ||
+			error.message.includes('timeout') ||
+			error.message.includes('TIMEOUT')
+		);
+		if (isTimeout) {
+			logDebug(`Docker Hub product lookup timeout for ${ref.repository} (${settings.dockerHubTimeoutMs}ms)`);
+		} else {
+			console.warn(`[metadata] Docker Hub product lookup failed for ${ref.repository}:`, error);
+		}
 		return null;
 	}
 };

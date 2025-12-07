@@ -15,7 +15,22 @@ export const GET: RequestHandler = async ({ params }) => {
 		}
 		
 		const docker = getDockerClient(source);
-		const containers = await docker.listContainers({ all: true });
+		
+		// Helper to add timeout to Docker API calls
+		const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> => {
+			return Promise.race([
+				promise,
+				new Promise<never>((_, reject) => {
+					setTimeout(() => reject(new Error(`${errorMessage} (timeout after ${timeoutMs}ms)`)), timeoutMs);
+				})
+			]);
+		};
+		
+		const containers = await withTimeout(
+			docker.listContainers({ all: true }),
+			settings.dockerApiTimeoutMs,
+			`Docker API timeout for ${source.name} (listContainers)`
+		);
 		const runningContainers = containers.filter((c) => c.State === 'running');
 		
 		// Get container memory usage for all running containers
@@ -61,7 +76,11 @@ export const GET: RequestHandler = async ({ params }) => {
 		const topContainers = allContainerMemories.slice(0, 5);
 		
 		// Get system info
-		const info = await docker.info();
+		const info = await withTimeout(
+			docker.info(),
+			settings.dockerApiTimeoutMs,
+			`Docker API timeout for ${source.name} (info)`
+		);
 		const memoryTotal =
 			(info.MemTotal && typeof info.MemTotal === 'number' && info.MemTotal > 0
 				? info.MemTotal

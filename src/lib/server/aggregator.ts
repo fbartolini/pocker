@@ -10,6 +10,18 @@ import { generateColorForString } from '$lib/utils/colors';
 
 const settings = getServerSettings();
 
+/**
+ * Wraps a promise with a timeout to prevent hanging on unreachable Docker sources
+ */
+const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> => {
+	return Promise.race([
+		promise,
+		new Promise<never>((_, reject) => {
+			setTimeout(() => reject(new Error(`${errorMessage} (timeout after ${timeoutMs}ms)`)), timeoutMs);
+		})
+	]);
+};
+
 type ContainerPort = NonNullable<Docker.ContainerInfo['Ports']>[number];
 
 type WorkingApp = {
@@ -272,13 +284,21 @@ const upsertWorkingApp = (
 
 const fetchContainersForSource = async (source: SourceConfig) => {
 	const docker = getDockerClient(source);
-	return docker.listContainers({ all: true });
+	return withTimeout(
+		docker.listContainers({ all: true }),
+		settings.dockerApiTimeoutMs,
+		`Docker API timeout for ${source.name} (listContainers)`
+	);
 };
 
 const fetchSystemInfoForSource = async (source: SourceConfig) => {
 	try {
 		const docker = getDockerClient(source);
-		const info = await docker.info();
+		const info = await withTimeout(
+			docker.info(),
+			settings.dockerApiTimeoutMs,
+			`Docker API timeout for ${source.name} (info)`
+		);
 		
 		// Log the raw Docker info response to understand the structure
 		// This helps us parse it correctly - enable with METADATA_DEBUG=true
@@ -387,25 +407,33 @@ const fetchSystemInfoForSource = async (source: SourceConfig) => {
 			// Use docker.df() if available, otherwise fall back to manual dial
 			let dfResponse: any;
 			if (typeof (docker as any).df === 'function') {
-				dfResponse = await (docker as any).df();
+				dfResponse = await withTimeout(
+					(docker as any).df(),
+					settings.dockerApiTimeoutMs,
+					`Docker API timeout for ${source.name} (df)`
+				);
 			} else {
-				dfResponse = await new Promise<any>((resolve, reject) => {
-					docker.modem.dial(
-						{
-							path: '/system/df',
-							method: 'GET',
-							statusCodes: {
-								200: true,
-								400: true,
-								500: true
+				dfResponse = await withTimeout(
+					new Promise<any>((resolve, reject) => {
+						docker.modem.dial(
+							{
+								path: '/system/df',
+								method: 'GET',
+								statusCodes: {
+									200: true,
+									400: true,
+									500: true
+								}
+							},
+							(err: Error | null, data: any) => {
+								if (err) reject(err);
+								else resolve(data);
 							}
-						},
-						(err: Error | null, data: any) => {
-							if (err) reject(err);
-							else resolve(data);
-						}
-					);
-				});
+						);
+					}),
+					settings.dockerApiTimeoutMs,
+					`Docker API timeout for ${source.name} (df)`
+				);
 			}
 			
 			if (dfResponse && typeof dfResponse === 'object') {
@@ -604,8 +632,27 @@ export const getAggregatedApps = async (): Promise<AppsResponse> => {
 	// Fetch system info for each source in parallel
 	const systemInfoMatrix = await Promise.all(
 		settings.dockerSources.map(async (source) => {
-			const systemInfo = await fetchSystemInfoForSource(source);
-			return { source, systemInfo };
+			try {
+				const systemInfo = await fetchSystemInfoForSource(source);
+				return { source, systemInfo };
+			} catch (error) {
+				console.warn(`[aggregator] Unable to fetch system info for ${source.name}:`, error);
+				return { 
+					source, 
+					systemInfo: {
+						memory: undefined,
+						storage: undefined,
+						dockerVersion: undefined,
+						cpuCount: undefined,
+						totalImages: undefined,
+						operatingSystem: undefined,
+						kernelVersion: undefined,
+						architecture: undefined,
+						storageDriver: undefined,
+						dockerStorage: undefined
+					}
+				};
+			}
 		})
 	);
 	
@@ -680,18 +727,33 @@ export const getAggregatedApps = async (): Promise<AppsResponse> => {
 			const contextLabels = entry.labels;
 			entry.app.versions.sort(compareVersions);
 			entry.app.latestVersion = entry.app.versions.at(-1) ?? null;
-			entry.app.icon = await resolveIcon({
-				image: entry.app.image,
-				labels: contextLabels,
-				iconHint: entry.iconHint ?? undefined
-			});
-			entry.app.description =
-				entry.descriptionHint ??
-				(await resolveDescription({
+			
+			// Resolve icon with error handling - don't let failures block the app
+			try {
+				entry.app.icon = await resolveIcon({
 					image: entry.app.image,
 					labels: contextLabels,
-					descriptionHint: entry.descriptionHint
-				}));
+					iconHint: entry.iconHint ?? undefined
+				});
+			} catch (error) {
+				console.warn(`[aggregator] Failed to resolve icon for ${entry.app.image}:`, error);
+				entry.app.icon = null;
+			}
+			
+			// Resolve description with error handling - don't let failures block the app
+			try {
+				entry.app.description =
+					entry.descriptionHint ??
+					(await resolveDescription({
+						image: entry.app.image,
+						labels: contextLabels,
+						descriptionHint: entry.descriptionHint
+					}));
+			} catch (error) {
+				console.warn(`[aggregator] Failed to resolve description for ${entry.app.image}:`, error);
+				entry.app.description = entry.descriptionHint ?? null;
+			}
+			
 			entry.app.containers.sort((a, b) => a.sourceLabel.localeCompare(b.sourceLabel));
 			return entry.app;
 		})

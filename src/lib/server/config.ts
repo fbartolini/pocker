@@ -33,6 +33,8 @@ export type ServerSettings = {
 	metadataDebug: boolean;
 	publicMaxWidth?: string;
 	showComposeTags: boolean;
+	dockerHubTimeoutMs: number;
+	dockerApiTimeoutMs: number;
 };
 
 const SOURCE_DELIMITER = ';';
@@ -396,6 +398,8 @@ export const getServerSettings = (): ServerSettings => {
 	const metadataDebug = coerceBoolean(process.env.METADATA_DEBUG) ?? false;
 	const publicMaxWidth = process.env.PUBLIC_MAX_WIDTH?.trim() || undefined;
 	const showComposeTags = coerceBoolean(process.env.SHOW_COMPOSE_TAGS) ?? false;
+	const dockerHubTimeoutMs = Number(process.env.DOCKER_HUB_TIMEOUT_MS ?? 5_000); // 5 seconds default
+	const dockerApiTimeoutMs = Number(process.env.DOCKER_API_TIMEOUT_MS ?? 10_000); // 10 seconds default
 
 	Object.assign(settingsCache, {
 		dockerSources,
@@ -405,7 +409,9 @@ export const getServerSettings = (): ServerSettings => {
 		iconMap,
 		metadataDebug,
 		publicMaxWidth,
-		showComposeTags
+		showComposeTags,
+		dockerHubTimeoutMs,
+		dockerApiTimeoutMs
 	});
 
 	return settingsCache as ServerSettings;

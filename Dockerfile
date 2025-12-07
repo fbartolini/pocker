@@ -36,6 +36,12 @@ RUN npm ci --omit=dev
 
 COPY --from=build /app/build ./build
 
+# Verify build output exists
+RUN ls -la build/ && test -f build/index.js || (echo "ERROR: build/index.js not found!" && exit 1)
+
 EXPOSE 4173
+
+# Explicitly override any entrypoint from base image
+ENTRYPOINT []
 CMD ["node", "build/index.js"]
 

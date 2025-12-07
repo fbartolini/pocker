@@ -18,12 +18,20 @@ export const GET: RequestHandler = async ({ params }) => {
 		const container = docker.getContainer(containerId);
 		
 		// Fetch container stats with timeout
-		const statsPromise = container.stats({ stream: false });
-		const timeoutPromise = new Promise<never>((_, reject) => {
-			setTimeout(() => reject(new Error('Timeout')), 5000);
-		});
+		const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> => {
+			return Promise.race([
+				promise,
+				new Promise<never>((_, reject) => {
+					setTimeout(() => reject(new Error(`${errorMessage} (timeout after ${timeoutMs}ms)`)), timeoutMs);
+				})
+			]);
+		};
 		
-		const stats = await Promise.race([statsPromise, timeoutPromise]) as any;
+		const stats = await withTimeout(
+			container.stats({ stream: false }),
+			settings.dockerApiTimeoutMs,
+			`Docker API timeout for ${source.name} (container stats)`
+		) as any;
 		
 		// Extract relevant stats
 		const result: {
