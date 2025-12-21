@@ -4,6 +4,25 @@ import type { SourceConfig } from './config';
 import { getDockerClient, withTimeout } from './docker-client';
 import { getServerSettings } from './config';
 
+// Type for Docker info response - minimal interface based on what we use
+interface DockerInfo {
+	MemTotal?: number | null;
+	MemoryTotal?: number | string | null;
+	MemAvailable?: number | null;
+	MemFree?: number | null;
+	ServerVersion?: string;
+	NCPU?: number;
+	Images?: number;
+	OperatingSystem?: string;
+	KernelVersion?: string;
+	Architecture?: string;
+	Driver?: string;
+	DriverStatus?: Array<[string, string]>;
+	PoolBlocksize?: number;
+	PoolBlocksUsed?: number;
+	PoolBlocksTotal?: number;
+}
+
 /**
  * Extracts container name from container info
  */
@@ -47,7 +66,7 @@ export const calculateMemoryUsage = (stats: any): number => {
 /**
  * Extracts total memory from Docker info response
  */
-export const extractMemoryTotal = (info: Docker.DockerInfo): number => {
+export const extractMemoryTotal = (info: DockerInfo): number => {
 	// Priority 1: MemTotal (in bytes)
 	if (info.MemTotal !== undefined && info.MemTotal !== null && typeof info.MemTotal === 'number' && info.MemTotal > 0) {
 		return info.MemTotal;
@@ -87,7 +106,7 @@ export const getContainerStats = async (
 export const getDockerInfo = async (
 	source: SourceConfig,
 	timeoutMs: number
-): Promise<Docker.DockerInfo> => {
+): Promise<DockerInfo> => {
 	const docker = getDockerClient(source);
 	return withTimeout(
 		docker.info(),
