@@ -75,7 +75,22 @@ const buildOptions = (source: SourceConfig): Docker.DockerOptions => {
 
 export const getDockerClient = (source: SourceConfig): Docker => {
 	if (!clients.has(source.name)) {
-		clients.set(source.name, new Docker(buildOptions(source)));
+		const options = buildOptions(source);
+		
+		// Debug logging for client creation
+		const debug = process.env.METADATA_DEBUG === 'true';
+		if (debug) {
+			console.log(`[docker-client] Creating Docker client for "${source.name}":`, {
+				protocol: options.protocol,
+				host: options.host,
+				port: options.port,
+				socketPath: options.socketPath,
+				hasAuth: !!(source.auth?.username || source.auth?.password),
+				hasTLS: !!(options.ca || options.cert || options.key)
+			});
+		}
+		
+		clients.set(source.name, new Docker(options));
 	}
 
 	return clients.get(source.name)!;
@@ -98,10 +113,83 @@ export const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, errorMess
  */
 export const listContainers = async (source: SourceConfig, timeoutMs: number): Promise<Docker.ContainerInfo[]> => {
 	const docker = getDockerClient(source);
-	return withTimeout(
-		docker.listContainers({ all: true }),
-		timeoutMs,
-		`Docker API timeout for ${source.name} (listContainers)`
-	);
+	
+	// Build debug info about the endpoint being used
+	const debug = process.env.METADATA_DEBUG === 'true';
+	let endpointInfo = '';
+	let expectedUrl = '';
+	if (source.socketPath) {
+		endpointInfo = `socket: ${source.socketPath}`;
+	} else if (source.endpoint) {
+		const endpointUrl = new URL(source.endpoint);
+		const protocol = endpointUrl.protocol.replace(':', '');
+		const port = endpointUrl.port || (protocol === 'https' ? '443' : '80');
+		// Dockerode uses versioned API: /v1.41/containers/json (or detected version)
+		expectedUrl = `${protocol}://${endpointUrl.hostname}:${port}/v1.41/containers/json?all=true`;
+		endpointInfo = `endpoint: ${source.endpoint}`;
+		if (source.auth?.username) {
+			endpointInfo += ` (with auth: ${source.auth.username})`;
+		}
+	}
+	
+	if (debug) {
+		console.log(`[docker-client] Listing containers for "${source.name}":`, {
+			endpoint: endpointInfo,
+			expectedUrl: expectedUrl || 'N/A (socket)',
+			timeout: `${timeoutMs}ms`
+		});
+	}
+	
+	const startTime = Date.now();
+	try {
+		// Create the promise first to catch any immediate errors
+		const listPromise = docker.listContainers({ all: true });
+		
+		const result = await withTimeout(
+			listPromise,
+			timeoutMs,
+			`Docker API timeout for ${source.name} (listContainers)`
+		);
+		
+		const duration = Date.now() - startTime;
+		if (debug) {
+			console.log(`[docker-client] Successfully listed ${result.length} containers for "${source.name}" in ${duration}ms`);
+		}
+		
+		return result;
+	} catch (error) {
+		const duration = Date.now() - startTime;
+		const errorMessage = error instanceof Error ? error.message : String(error);
+		const errorStack = error instanceof Error ? error.stack : undefined;
+		
+		// Enhanced error logging
+		const errorDetails: any = {
+			error: errorMessage,
+			endpoint: endpointInfo,
+			expectedUrl: expectedUrl || 'N/A (socket)',
+			timeout: `${timeoutMs}ms`,
+			duration: `${duration}ms`
+		};
+		
+		// Check if it's a specific error type
+		if (error instanceof Error) {
+			if (error.message.includes('ECONNREFUSED')) {
+				errorDetails.suggestion = 'Connection refused - check if the Docker API is running and accessible';
+			} else if (error.message.includes('ETIMEDOUT')) {
+				errorDetails.suggestion = 'Connection timeout - check network connectivity and firewall rules';
+			} else if (error.message.includes('ENOTFOUND')) {
+				errorDetails.suggestion = 'Host not found - check DNS resolution and hostname';
+			} else if (error.message.includes('timeout')) {
+				errorDetails.suggestion = `Request timed out after ${duration}ms - the endpoint may be slow or unreachable from the server`;
+			}
+		}
+		
+		if (errorStack && debug) {
+			errorDetails.stack = errorStack;
+		}
+		
+		console.error(`[docker-client] Failed to list containers for "${source.name}":`, errorDetails);
+		throw error;
+	}
 };
 
