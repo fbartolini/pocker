@@ -123,3 +123,10 @@ export const findSource = (sourceId: string): SourceConfig | null => {
 	return settings.dockerSources.find(s => s.name === sourceId) ?? null;
 };
 
+/**
+ * Gets the timeout for a source (uses source-specific timeout if set, otherwise global default)
+ */
+export const getSourceTimeout = (source: SourceConfig, defaultTimeoutMs: number): number => {
+	return source.timeoutMs ?? defaultTimeoutMs;
+};
+

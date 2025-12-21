@@ -1,8 +1,14 @@
 services:
   pocker:
-    image: fbartolini/pocker:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pocker:local
     container_name: pocker
     restart: unless-stopped
+    # Option 1: Host networking (for VPN access) - requires HOST=0.0.0.0
+    # network_mode: host
+    # Option 2: Bridge networking (works better for port binding)
     ports:
       - "4173:4173"
     env_file:
@@ -14,4 +20,8 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./config:/app/config:ro
+    # For bridge networking with VPN access, you may need to add:
+    # network_mode: bridge
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
 

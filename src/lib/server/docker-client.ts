@@ -110,8 +110,12 @@ export const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, errorMess
 
 /**
  * Lists all containers for a source with timeout handling
+ * @param source - Docker source configuration
+ * @param timeoutMs - Timeout in milliseconds (can be overridden by source.timeoutMs)
  */
 export const listContainers = async (source: SourceConfig, timeoutMs: number): Promise<Docker.ContainerInfo[]> => {
+	// Use source-specific timeout if provided (useful for VPN/remote connections)
+	const effectiveTimeout = source.timeoutMs ?? timeoutMs;
 	const docker = getDockerClient(source);
 	
 	// Build debug info about the endpoint being used
@@ -147,7 +151,7 @@ export const listContainers = async (source: SourceConfig, timeoutMs: number): P
 		
 		const result = await withTimeout(
 			listPromise,
-			timeoutMs,
+			effectiveTimeout,
 			`Docker API timeout for ${source.name} (listContainers)`
 		);
 		
@@ -162,34 +166,60 @@ export const listContainers = async (source: SourceConfig, timeoutMs: number): P
 		const errorMessage = error instanceof Error ? error.message : String(error);
 		const errorStack = error instanceof Error ? error.stack : undefined;
 		
+		// Detect the actual error type - don't just say "timeout" if it's a connection error
+		let actualErrorType = 'unknown';
+		let userFriendlyMessage = errorMessage;
+		
+		if (error instanceof Error) {
+			// Check for specific Node.js error codes (these are more reliable than message parsing)
+			const errorCode = (error as any).code;
+			
+			if (errorCode === 'ECONNREFUSED') {
+				actualErrorType = 'connection_refused';
+				userFriendlyMessage = `Connection refused to ${source.endpoint || source.socketPath} - the Docker API may not be accessible from this container's network. Check network connectivity and firewall rules.`;
+			} else if (errorCode === 'ETIMEDOUT' || errorCode === 'ESOCKETTIMEDOUT') {
+				actualErrorType = 'connection_timeout';
+				userFriendlyMessage = `Connection timeout to ${source.endpoint || source.socketPath} - check network connectivity from container. The endpoint may be unreachable from the container's network namespace.`;
+			} else if (errorCode === 'ENOTFOUND' || errorCode === 'EAI_AGAIN') {
+				actualErrorType = 'dns_error';
+				userFriendlyMessage = `DNS resolution failed for ${source.endpoint} - hostname cannot be resolved from container. Check DNS configuration and hostname/IP address.`;
+			} else if (errorCode === 'ECONNRESET') {
+				actualErrorType = 'connection_reset';
+				userFriendlyMessage = `Connection reset by ${source.endpoint || source.socketPath}`;
+			} else if (errorMessage.includes('timeout') && duration >= effectiveTimeout * 0.9) {
+				// Only call it a timeout if we actually waited most of the timeout period
+				actualErrorType = 'request_timeout';
+				userFriendlyMessage = `Request timed out after ${duration}ms - endpoint may be slow or unreachable from container network`;
+			} else if (errorMessage.includes('timeout')) {
+				// If error says timeout but we didn't wait long, it's likely a connection issue
+				actualErrorType = 'connection_issue';
+				userFriendlyMessage = `Connection issue to ${source.endpoint || source.socketPath} (reported as timeout but likely network/DNS issue from container)`;
+			}
+		}
+		
 		// Enhanced error logging
 		const errorDetails: any = {
 			error: errorMessage,
+			errorCode: (error as any).code,
+			errorType: actualErrorType,
 			endpoint: endpointInfo,
 			expectedUrl: expectedUrl || 'N/A (socket)',
-			timeout: `${timeoutMs}ms`,
+			timeout: `${effectiveTimeout}ms`,
 			duration: `${duration}ms`
 		};
-		
-		// Check if it's a specific error type
-		if (error instanceof Error) {
-			if (error.message.includes('ECONNREFUSED')) {
-				errorDetails.suggestion = 'Connection refused - check if the Docker API is running and accessible';
-			} else if (error.message.includes('ETIMEDOUT')) {
-				errorDetails.suggestion = 'Connection timeout - check network connectivity and firewall rules';
-			} else if (error.message.includes('ENOTFOUND')) {
-				errorDetails.suggestion = 'Host not found - check DNS resolution and hostname';
-			} else if (error.message.includes('timeout')) {
-				errorDetails.suggestion = `Request timed out after ${duration}ms - the endpoint may be slow or unreachable from the server`;
-			}
-		}
 		
 		if (errorStack && debug) {
 			errorDetails.stack = errorStack;
 		}
 		
 		console.error(`[docker-client] Failed to list containers for "${source.name}":`, errorDetails);
-		throw error;
+		
+		// Throw a more descriptive error that will be shown to the user
+		const improvedError = new Error(userFriendlyMessage);
+		(improvedError as any).code = (error as any).code;
+		(improvedError as any).originalError = error;
+		(improvedError as any).errorType = actualErrorType;
+		throw improvedError;
 	}
 };
 

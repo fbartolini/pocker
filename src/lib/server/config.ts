@@ -12,6 +12,7 @@ export type SourceConfig = {
 	socketPath?: string;
 	uiBase?: string;
 	color?: string; // Hex color code for UI display (e.g., "#4f80ff")
+	timeoutMs?: number; // Optional per-source timeout override (defaults to DOCKER_API_TIMEOUT_MS)
 	auth?: {
 		username?: string;
 		password?: string;
@@ -118,6 +119,9 @@ const normalizeSocketPath = (value?: string): string | undefined => {
 	};
 
 const parseJsonSource = (obj: any): SourceConfig | null => {
+	// Parse timeout if provided (useful for VPN/remote connections)
+	const timeoutMs = obj.timeout || obj.timeoutMs || obj.timeout_ms;
+	const parsedTimeout = timeoutMs ? Number(timeoutMs) : undefined;
 	if (!obj || typeof obj !== 'object') return null;
 	
 	const name = obj.name || obj.id;
@@ -152,6 +156,7 @@ const parseJsonSource = (obj: any): SourceConfig | null => {
 			socketPath,
 			uiBase: obj.ui || obj.uiBase,
 			color,
+			timeoutMs: parsedTimeout && parsedTimeout > 0 ? parsedTimeout : undefined,
 			auth: obj.user || obj.username || obj.password
 				? {
 						username: obj.user || obj.username,
