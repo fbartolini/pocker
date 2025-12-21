@@ -2,25 +2,14 @@ import type Docker from 'dockerode';
 
 import type { AggregatedApp, AppsResponse, ServerInstance, ServerStats } from '$lib/types';
 import { getServerSettings, type SourceConfig } from './config';
-import { getDockerClient } from './docker-client';
+import { getDockerClient, listContainers, withTimeout } from './docker-client';
+import { getContainerName, extractMemoryTotal } from './docker-utils';
 import { friendlyImageName, getImageBase, parseImageReference } from './image';
 import { resolveDescription, resolveIcon } from './metadata';
 import { compareVersions, isSemanticVersion } from '$lib/utils/version';
 import { generateColorForString } from '$lib/utils/colors';
 
 const settings = getServerSettings();
-
-/**
- * Wraps a promise with a timeout to prevent hanging on unreachable Docker sources
- */
-const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> => {
-	return Promise.race([
-		promise,
-		new Promise<never>((_, reject) => {
-			setTimeout(() => reject(new Error(`${errorMessage} (timeout after ${timeoutMs}ms)`)), timeoutMs);
-		})
-	]);
-};
 
 type ContainerPort = NonNullable<Docker.ContainerInfo['Ports']>[number];
 
@@ -179,7 +168,7 @@ const toServerInstance = (
 		sourceId: source.name,
 		sourceLabel: source.displayName,
 		containerId: container.Id,
-		containerName: container.Names?.[0]?.replace(/^\//, '') ?? container.Id.slice(0, 12),
+		containerName: getContainerName(container),
 		state: container.State ?? 'unknown',
 		exitCode,
 		version: labels['org.opencontainers.image.version'],
@@ -283,12 +272,7 @@ const upsertWorkingApp = (
 };
 
 const fetchContainersForSource = async (source: SourceConfig) => {
-	const docker = getDockerClient(source);
-	return withTimeout(
-		docker.listContainers({ all: true }),
-		settings.dockerApiTimeoutMs,
-		`Docker API timeout for ${source.name} (listContainers)`
-	);
+	return listContainers(source, settings.dockerApiTimeoutMs);
 };
 
 const fetchSystemInfoForSource = async (source: SourceConfig) => {
@@ -327,33 +311,27 @@ const fetchSystemInfoForSource = async (source: SourceConfig) => {
 		let memoryUsed = 0;
 		let memoryAvailable = 0;
 		
-		// Priority 1: Use MemTotal (in bytes)
-		// Based on the logs, MemTotal values like 12884901888 represent 12GB, so they're already in bytes
-		if (info.MemTotal !== undefined && info.MemTotal !== null && typeof info.MemTotal === 'number' && info.MemTotal > 0) {
-			memoryTotal = info.MemTotal; // Already in bytes
-		}
-		// Priority 2: Fallback to MemoryTotal (bytes, Docker daemon's view)
-		else if (info.MemoryTotal !== undefined && info.MemoryTotal !== null) {
-			if (typeof info.MemoryTotal === 'number' && info.MemoryTotal > 0) {
-				memoryTotal = info.MemoryTotal; // Already in bytes
-			} else if (typeof info.MemoryTotal === 'string' && info.MemoryTotal.trim()) {
-				// Parse string format if Docker returns it as string
-				const match = info.MemoryTotal.match(/([\d.]+)\s*(TiB|GiB|MiB|KiB|B|TB|GB|MB|KB)?/i);
-				if (match) {
-					const value = parseFloat(match[1]);
-					const unit = (match[2] || '').toLowerCase();
-					if (unit.includes('tib') || unit.includes('tb')) {
-						memoryTotal = value * 1024 * 1024 * 1024 * 1024;
-					} else if (unit.includes('gib') || unit.includes('gb')) {
-						memoryTotal = value * 1024 * 1024 * 1024;
-					} else if (unit.includes('mib') || unit.includes('mb')) {
-						memoryTotal = value * 1024 * 1024;
-					} else if (unit.includes('kib') || unit.includes('kb')) {
-						memoryTotal = value * 1024;
-					} else {
-						// No unit - assume bytes
-						memoryTotal = value;
-					}
+		// Use shared utility for basic memory extraction
+		memoryTotal = extractMemoryTotal(info);
+		
+		// Handle string format if Docker returns MemoryTotal as string (for aggregator's more complex parsing)
+		if (memoryTotal === 0 && info.MemoryTotal !== undefined && info.MemoryTotal !== null && typeof info.MemoryTotal === 'string' && info.MemoryTotal.trim()) {
+			// Parse string format if Docker returns it as string
+			const match = info.MemoryTotal.match(/([\d.]+)\s*(TiB|GiB|MiB|KiB|B|TB|GB|MB|KB)?/i);
+			if (match) {
+				const value = parseFloat(match[1]);
+				const unit = (match[2] || '').toLowerCase();
+				if (unit.includes('tib') || unit.includes('tb')) {
+					memoryTotal = value * 1024 * 1024 * 1024 * 1024;
+				} else if (unit.includes('gib') || unit.includes('gb')) {
+					memoryTotal = value * 1024 * 1024 * 1024;
+				} else if (unit.includes('mib') || unit.includes('mb')) {
+					memoryTotal = value * 1024 * 1024;
+				} else if (unit.includes('kib') || unit.includes('kb')) {
+					memoryTotal = value * 1024;
+				} else {
+					// No unit - assume bytes
+					memoryTotal = value;
 				}
 			}
 		}

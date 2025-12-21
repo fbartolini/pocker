@@ -1,66 +1,32 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { getDockerClient } from '$lib/server/docker-client';
+import { listContainers } from '$lib/server/docker-client';
 import { getServerSettings } from '$lib/server/config';
+import { findSource, getContainerName, getContainerStats, getDockerInfo, calculateMemoryUsage, extractMemoryTotal } from '$lib/server/docker-utils';
 
 export const GET: RequestHandler = async ({ params }) => {
 	try {
 		const { sourceId } = params;
 		const settings = getServerSettings();
 		
-		// Find the source by name
-		const source = settings.dockerSources.find(s => s.name === sourceId);
+		const source = findSource(sourceId);
 		if (!source) {
 			return json({ error: 'Source not found' }, { status: 404 });
 		}
 		
-		const docker = getDockerClient(source);
-		
-		// Helper to add timeout to Docker API calls
-		const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> => {
-			return Promise.race([
-				promise,
-				new Promise<never>((_, reject) => {
-					setTimeout(() => reject(new Error(`${errorMessage} (timeout after ${timeoutMs}ms)`)), timeoutMs);
-				})
-			]);
-		};
-		
-		const containers = await withTimeout(
-			docker.listContainers({ all: true }),
-			settings.dockerApiTimeoutMs,
-			`Docker API timeout for ${source.name} (listContainers)`
-		);
+		const containers = await listContainers(source, settings.dockerApiTimeoutMs);
 		const runningContainers = containers.filter((c) => c.State === 'running');
 		
 		// Get container memory usage for all running containers
 		const containerMemoryPromises = runningContainers.map(async (container) => {
 			try {
-				const containerObj = docker.getContainer(container.Id);
-				const statsPromise = containerObj.stats({ stream: false });
-				const timeoutPromise = new Promise<never>((_, reject) => {
-					setTimeout(() => reject(new Error('Timeout')), 3000);
-				});
+				// Use shorter timeout for individual container stats (3 seconds)
+				const stats = await getContainerStats(source, container.Id, 3000) as any;
 				
-				const stats = await Promise.race([statsPromise, timeoutPromise]) as any;
-				
-				let memoryUsage = 0;
-				if (stats.memory_stats?.usage && stats.memory_stats?.stats) {
-					const stats_obj = stats.memory_stats.stats;
-					const activeAnon = stats_obj.active_anon || 0;
-					const inactiveAnon = stats_obj.inactive_anon || 0;
-					const kernelStack = stats_obj.kernel_stack || 0;
-					const slab = stats_obj.slab || 0;
-					const rss = activeAnon + inactiveAnon + kernelStack + slab;
-					if (rss > 0) {
-						memoryUsage = rss;
-					} else {
-						memoryUsage = stats.memory_stats.usage;
-					}
-				}
+				const memoryUsage = calculateMemoryUsage(stats);
 				
 				return {
-					name: container.Names?.[0]?.replace(/^\//, '') || container.Id.slice(0, 12),
+					name: getContainerName(container),
 					memory: memoryUsage
 				};
 			} catch (error) {
@@ -76,17 +42,8 @@ export const GET: RequestHandler = async ({ params }) => {
 		const topContainers = allContainerMemories.slice(0, 5);
 		
 		// Get system info
-		const info = await withTimeout(
-			docker.info(),
-			settings.dockerApiTimeoutMs,
-			`Docker API timeout for ${source.name} (info)`
-		);
-		const memoryTotal =
-			(info.MemTotal && typeof info.MemTotal === 'number' && info.MemTotal > 0
-				? info.MemTotal
-				: info.MemoryTotal && typeof info.MemoryTotal === 'number' && info.MemoryTotal > 0
-					? info.MemoryTotal
-					: 0) || 0;
+		const info = await getDockerInfo(source, settings.dockerApiTimeoutMs);
+		const memoryTotal = extractMemoryTotal(info);
 		
 		return json({
 			topContainers,

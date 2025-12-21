@@ -81,3 +81,27 @@ export const getDockerClient = (source: SourceConfig): Docker => {
 	return clients.get(source.name)!;
 };
 
+/**
+ * Wraps a promise with a timeout to prevent hanging on unreachable Docker sources
+ */
+export const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> => {
+	return Promise.race([
+		promise,
+		new Promise<never>((_, reject) => {
+			setTimeout(() => reject(new Error(`${errorMessage} (timeout after ${timeoutMs}ms)`)), timeoutMs);
+		})
+	]);
+};
+
+/**
+ * Lists all containers for a source with timeout handling
+ */
+export const listContainers = async (source: SourceConfig, timeoutMs: number): Promise<Docker.ContainerInfo[]> => {
+	const docker = getDockerClient(source);
+	return withTimeout(
+		docker.listContainers({ all: true }),
+		timeoutMs,
+		`Docker API timeout for ${source.name} (listContainers)`
+	);
+};
+

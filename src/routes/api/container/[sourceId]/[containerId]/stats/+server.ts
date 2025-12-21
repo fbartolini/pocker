@@ -1,37 +1,19 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { getDockerClient } from '$lib/server/docker-client';
 import { getServerSettings } from '$lib/server/config';
+import { findSource, getContainerStats, calculateMemoryUsage } from '$lib/server/docker-utils';
 
 export const GET: RequestHandler = async ({ params }) => {
 	try {
 		const { sourceId, containerId } = params;
 		const settings = getServerSettings();
 		
-		// Find the source by name
-		const source = settings.dockerSources.find(s => s.name === sourceId);
+		const source = findSource(sourceId);
 		if (!source) {
 			return json({ error: 'Source not found' }, { status: 404 });
 		}
 		
-		const docker = getDockerClient(source);
-		const container = docker.getContainer(containerId);
-		
-		// Fetch container stats with timeout
-		const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> => {
-			return Promise.race([
-				promise,
-				new Promise<never>((_, reject) => {
-					setTimeout(() => reject(new Error(`${errorMessage} (timeout after ${timeoutMs}ms)`)), timeoutMs);
-				})
-			]);
-		};
-		
-		const stats = await withTimeout(
-			container.stats({ stream: false }),
-			settings.dockerApiTimeoutMs,
-			`Docker API timeout for ${source.name} (container stats)`
-		) as any;
+		const stats = await getContainerStats(source, containerId, settings.dockerApiTimeoutMs) as any;
 		
 		// Extract relevant stats
 		const result: {
@@ -43,22 +25,8 @@ export const GET: RequestHandler = async ({ params }) => {
 		
 		// Memory stats
 		if (stats.memory_stats) {
-			const usage = stats.memory_stats.usage || 0;
 			const limit = stats.memory_stats.limit || 0;
-			
-			// Calculate RSS if available
-			let memoryUsage = usage;
-			if (stats.memory_stats.stats) {
-				const stats_obj = stats.memory_stats.stats;
-				const activeAnon = stats_obj.active_anon || 0;
-				const inactiveAnon = stats_obj.inactive_anon || 0;
-				const kernelStack = stats_obj.kernel_stack || 0;
-				const slab = stats_obj.slab || 0;
-				const rss = activeAnon + inactiveAnon + kernelStack + slab;
-				if (rss > 0) {
-					memoryUsage = rss;
-				}
-			}
+			const memoryUsage = calculateMemoryUsage(stats);
 			
 			result.memory = {
 				usage: memoryUsage,
